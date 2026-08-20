@@ -1257,10 +1257,10 @@
 
                   <div style={styles.setupValueDisplay}>{game.startingChips.toLocaleString()}</div>
 
-                  <button style={styles.setupStepBtn} onClick={() => setGame(g => ({ ...g, startingChips: Math.min(1000000, g.startingChips + 500) }))}>+500</button>
-                  <button style={styles.setupStepBtn} onClick={() => setGame(g => ({ ...g, startingChips: Math.min(1000000, g.startingChips + 1000) }))}>+1k</button>
-                  <button style={styles.setupStepBtn} onClick={() => setGame(g => ({ ...g, startingChips: Math.min(1000000, g.startingChips + 10000) }))}>+10k</button>
-                  <button style={styles.setupStepBtn} onClick={() => setGame(g => ({ ...g, startingChips: 1000000 }))}>Max</button>
+                  <button style={styles.setupStepBtn} onClick={() => setGame(g => ({ ...g, startingChips: Math.min(100000, g.startingChips + 500) }))}>+500</button>
+                  <button style={styles.setupStepBtn} onClick={() => setGame(g => ({ ...g, startingChips: Math.min(100000, g.startingChips + 1000) }))}>+1k</button>
+                  <button style={styles.setupStepBtn} onClick={() => setGame(g => ({ ...g, startingChips: Math.min(100000, g.startingChips + 10000) }))}>+10k</button>
+                  <button style={styles.setupStepBtn} onClick={() => setGame(g => ({ ...g, startingChips: 100000 }))}>Max</button>
                 </div>
               </div>
 
