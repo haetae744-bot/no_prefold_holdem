@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+x<!DOCTYPE html>
 <html lang="ko">
 
 <head>
@@ -39,8 +39,6 @@
   <script type="text/babel">
     const { useState, useRef, useEffect } = React;
 
-    const AI_COUNT_OPTIONS = [1, 2, 3, 4, 5, 6, 7, 8];
-
     const SUITS = ["♠", "♥", "♦", "♣"];
     const SUIT_COLOR = { "♠": "#181818", "♣": "#181818", "♥": "#c0392b", "♦": "#c0392b" };
     const RANK_LABEL = { 11: "J", 12: "Q", 13: "K", 14: "A" };
@@ -50,7 +48,7 @@
       4: "스트레이트", 5: "플러시", 6: "풀하우스", 7: "포카드", 8: "스트레이트 플러시",
     };
 
-    const AI_TYPES = ["TAG", "Maniac", "Rock", "Station"];
+    
     //  --- 새로 추가할 사운드  ---
     const SOUND_URLS = {
       bgm: "./audio/bgm.mp3",
@@ -378,7 +376,7 @@
     //최소 오프닝 베팅 계산 (25% 룰 및 100단위 CEIL)
     function calcMinOpeningBet(ante, streetStartPot) {
       const safePot = streetStartPot || 0; // 💡 방어 코드: 값이 없으면 0으로 계산하여 NaN 에러 방지
-      const twentyFivePercent = Math.ceil((streetStartPot * 0.25) / 100) * 100;
+      const twentyFivePercent = Math.ceil((safePot * 0.25) / 100) * 100;
       return Math.max(ante * 2, twentyFivePercent);
     }
 
@@ -585,7 +583,7 @@
     }
 
 
-    function decideAI(ev, toCall, chips, pot, aiType, drawInfo, hole, community, currentAnte, streetStartPot) {
+    function decideAI(ev, toCall, chips, pot, aiType, drawInfo, hole, community, currentAnte, streetStartPot, opponentsCount) {
       const { isStrong, isModerate, isWeak } = getRelativeStrength(ev, hole, community, toCall, pot);
       const isRiver = community.length === 5;
       const potOdds = toCall > 0 ? toCall / (pot + toCall) : 0;
@@ -610,43 +608,76 @@
         }
 
         const roundedBet = Math.max(currentAnte * 5, Math.round(rawBet / 100) * 100);
-        return Math.min(roundedBet, chips);
+        return Math.max(minBetAllowed, Math.min(roundedBet, chips));
       };
 
-      // --------------------------------------------------
+      // 사람이 많을수록 블러핑/무리한 벳을 줄이는 페널티 (최대 70%까지 감소)
+      const multiwayPenalty = opponentsCount ? Math.max(0.3, 1 - (opponentsCount - 1) * 0.2) : 1;
+
+      // 팟 사이즈 기반으로 '얄밉게' 베팅하는 계산기 (씬 밸류 / 가벼운 블러프용)
+      const calculateThinBet = (minR, maxR) => {
+        const ratio = minR + Math.random() * (maxR - minR);
+        const rawBet = pot * ratio;
+        
+        // 💡 수정: 외부 함수 호출 대신, 바로 위에서 이미 계산한 방식을 그대로 사용합니다.
+        let thinMinBetAllowed;
+        if (toCall === 0) {
+          const safePot = streetStartPot || 0; 
+          const twentyFivePercent = Math.ceil((safePot * 0.25) / 100) * 100;
+          thinMinBetAllowed = Math.max(currentAnte * 2, twentyFivePercent);
+        } else {
+          thinMinBetAllowed = currentAnte * 2;
+        }
+
+        const roundedBet = Math.max(currentAnte * 5, Math.round(rawBet / 100) * 100);
+        return Math.max(thinMinBetAllowed, Math.min(roundedBet, chips));
+      };
+
       // 🌊 [리버(River) 전용 AI 판단 로직] 🌊
-      // --------------------------------------------------
+      // 💡 1. 완전 쓰레기 패(Total Air) 강제 폴드 로직을 가장 위로 끌어올립니다.
+      const isTotalAir = isWeak && drawInfo.outs === 0;
+      // 리버에서는 발전 가능성이 0이므로 weak이면 무조건 Total Air가 됩니다.
+      if (isTotalAir && toCall > 0) {
+        // 스테이션 성향이 가끔 호기심에 받아보는 것(10%) 빼고는 전원 폴드
+        if (aiType === "Station" && Math.random() < 0.10) return { type: "call" };
+        if (Math.random() < 0.95) return { type: "fold" };
+      }
+
+      // 🌊 [리버(River) 전용 AI 판단 로직] 🌊
       if (isRiver) {
         switch (aiType) {
           case "Maniac": // 미치광이: 블러핑 킹
             if (isStrong) return { type: "bet", amount: calculateBet() };
-            if (isWeak && toCall === 0 && Math.random() < 0.60) return { type: "bet", amount: calculateBet() }; // 60% 확률로 퓨어 블러프!
-            if (isWeak && toCall > 0 && Math.random() < 0.20) return { type: "bet", amount: calculateBet() }; // 베팅이 나와도 가끔 미친 리레이즈 블러프!
-            if (toCall <= currentAnte * 15) return { type: "call" };
+            if (isWeak && toCall === 0 && Math.random() < 0.60 * multiwayPenalty) return { type: "bet", amount: calculateThinBet(0.5, 0.8) };
+            if (isWeak && toCall > 0 && Math.random() < 0.20) return { type: "bet", amount: calculateThinBet(0.5, 0.8) }; 
+            if (toCall > 0 && potOdds < 0.35) return { type: "call" }; // 💡 고정값 제거
             return { type: "fold" };
 
           case "Rock": // 바위: 절대 무리 안 함
             if (isStrong) return { type: "bet", amount: calculateBet() };
-            if (isModerate && toCall <= currentAnte * 5) return { type: "call" }; // 아주 싼 값에만 블러프 캐치
+            if (isModerate && toCall > 0 && potOdds < 0.20) return { type: "call" }; // 💡 고정값 제거
             if (toCall > 0) return { type: "fold" };
             return { type: "check" };
 
           case "Station": // 콜링 스테이션: 궁금해서 다 받아줌
             if (isStrong) return { type: "bet", amount: calculateBet() };
-            if (toCall > 0 && Math.random() < 0.70) return { type: "call" }; // 70% 확률로 일단 콜 누름
+            if (toCall > 0 && potOdds < 0.40) return { type: "call" }; // 💡 무지성 70% 콜 제거
             if (toCall > 0) return { type: "fold" };
             return { type: "check" };
 
           case "TAG": // 타이트 어그레시브 (정석)
           default:
-            if (isStrong) return { type: "bet", amount: calculateBet() }; // 정석 밸류 베팅
+            if (isStrong) return { type: "bet", amount: calculateBet() }; 
             if (isModerate) {
-              if (toCall === 0) return { type: "check" }; // 팟 컨트롤
-              if (potOdds < 0.3) return { type: "call" }; // 수학적으로 합리적일 때만 블러프 캐치
+              if (toCall === 0) {
+                return Math.random() < 0.35 
+                  ? { type: "bet", amount: calculateThinBet(0.3, 0.4) } 
+                  : { type: "check" };
+              }
+              if (potOdds < 0.25) return { type: "call" }; 
               return { type: "fold" };
             }
-            // 약한 패일 때
-            if (toCall === 0 && Math.random() < 0.20) return { type: "bet", amount: calculateBet() }; // 20% 확률로 날카로운 블러핑 섞기
+            if (toCall === 0 && Math.random() < 0.20 * multiwayPenalty) return { type: "bet", amount: calculateThinBet(0.4, 0.6) }; 
             if (toCall > 0) return { type: "fold" };
             return { type: "check" };
         }
@@ -655,7 +686,6 @@
       // --------------------------------------------------
       // 🌱 [플랍 / 턴(Flop/Turn) 전용 AI 판단 로직] 🌱
       // --------------------------------------------------
-      const isTotalAir = isWeak && drawInfo.outs === 0;
 
       if (isTotalAir && toCall > 0 && Math.random() < 0.90) {
         return { type: "fold" };
@@ -664,8 +694,9 @@
       switch (aiType) {
         case "Maniac":
           if (isStrong) return { type: "bet", amount: calculateBet() };
-          if (Math.random() < getNoisyThreshold(0.40, 0.15)) return { type: "bet", amount: calculateBet() };
-          if (toCall <= currentAnte * 15) return { type: "call" };
+          if (Math.random() < getNoisyThreshold(0.40, 0.15) * multiwayPenalty) return { type: "bet", amount: calculateThinBet(0.5, 0.8) };
+          // 💡 수정: 무지성 40% 콜 제거. 애매한 패(isModerate)이거나 역전 확률(hitChance)이 오즈와 비빌 만할 때만 콜
+          if (toCall > 0 && (isModerate || drawInfo.hitChance >= potOdds - 0.10)) return { type: "call" };
           return { type: "fold" };
 
         case "Rock":
@@ -673,7 +704,9 @@
             if (Math.random() < getNoisyThreshold(0.20, 0.10) && toCall === 0) return { type: "check" };
             return { type: "bet", amount: calculateBet() };
           }
-          if (isModerate && toCall <= currentAnte * 15) return { type: "call" };
+          // 💡 수정: 바위는 보수적이므로 역전 확률이 오즈보다 확실히 높을 때만 콜
+          if (isModerate && toCall > 0 && potOdds < 0.25) return { type: "call" };
+          if (toCall > 0 && drawInfo.hitChance >= potOdds) return { type: "call" };
           if (toCall > 0) return { type: "fold" };
           return { type: "check" };
 
@@ -682,7 +715,8 @@
             if (toCall === 0 && Math.random() < getNoisyThreshold(0.30, 0.10)) return { type: "bet", amount: calculateBet() };
             return toCall > 0 ? { type: "call" } : { type: "check" };
           }
-          if (toCall > 0 && potOdds < getNoisyThreshold(0.40, 0.15)) return { type: "call" };
+          // 💡 수정: 콜링 스테이션이니까 콜을 좋아하지만, 아예 가망 없는 빵꾸 패로 올인은 안 받게 방어막 추가
+          if (toCall > 0 && (isModerate || drawInfo.hitChance >= potOdds - 0.20)) return { type: "call" };
           if (toCall > 0) return { type: "fold" };
           return { type: "check" };
 
@@ -690,11 +724,13 @@
         default:
           if (isStrong) return { type: "bet", amount: calculateBet() };
           if (isModerate) {
-            if (toCall === 0) return Math.random() < getNoisyThreshold(0.50, 0.10) ? { type: "bet", amount: currentAnte * 15 } : { type: "check" };
-            if (potOdds < getNoisyThreshold(0.25, 0.05)) return { type: "call" };
+            if (toCall === 0) return Math.random() < getNoisyThreshold(0.50, 0.10) ? { type: "bet", amount: calculateThinBet(0.3, 0.5) } : { type: "check" };
+            if (toCall > 0 && potOdds < getNoisyThreshold(0.25, 0.05)) return { type: "call" };
             return { type: "fold" };
           }
-          if (toCall === 0 && Math.random() < getNoisyThreshold(0.10, 0.05)) return { type: "bet", amount: currentAnte * 15 };
+          if (toCall === 0 && Math.random() < getNoisyThreshold(0.20, 0.05) * multiwayPenalty) return { type: "bet", amount: calculateThinBet(0.4, 0.6) };
+          // 💡 수정: TAG도 정석대로 역전 확률 수학적 계산 후 콜
+          if (toCall > 0 && drawInfo.hitChance >= potOdds) return { type: "call" };
           if (toCall > 0) return { type: "fold" };
           return { type: "check" };
       }
@@ -795,7 +831,7 @@
 
       const handleReset = () => {
         if (window.confirm("진행 중인 게임을 초기화하고 처음 화면으로 돌아가시겠습니까?")) {
-          setGame(g => ({ ...initialGame(), aiCount: g.aiCount }));
+          setGame(g => ({ ...initialGame(), aiCount: g.aiCount, ante: g.ante, startingChips: g.startingChips}));
           setBetAmount(initialGame().ante * 5);
           runningRef.current = false;
           if (userResolveRef.current) {
@@ -845,7 +881,7 @@
           const minIncrement = isOpening ? calcMinOpeningBet(s.ante, s.streetStartPot) : (s.ante * 2);
 
           let total = toCall + action.amount;
-          total = Math.max(1, Math.min(total, s.chips[player]));
+          total = Math.max(0, Math.min(total, s.chips[player]));
 
           //미달 올인 판별 (요구치 이상을 베팅했는가?)
           const actualIncrement = total - toCall;
@@ -896,13 +932,13 @@
           const currentCards = [...s.hole[p], ...s.community];
           const ev = evaluateBest(currentCards);
           const drawInfo = calculateDrawOuts(currentCards);
+          // 💡 수정: if/else 양쪽(유저·AI)에서 모두 쓸 수 있도록 상단으로 이동, 기준도 p 본인 제외로 일반화
+          const activeOpponentsCount = players.filter(opp => !s.folded[opp] && !s.eliminated[opp] && opp !== p).length;
 
           if (p === "user") {
             action = await getUserAction(s, toCall);
             if (!gameStateRef.current.setupDone) return;
             s.awaitingUser = false;
-
-            const activeOpponentsCount = players.filter(opp => !s.folded[opp] && !s.eliminated[opp] && opp !== "user").length;
 
             let actualInvested = 0;
             if (action.type === "call") actualInvested = Math.max(0, Math.min(toCall, s.chips.user));
@@ -924,7 +960,8 @@
           } else {
             await sleep(650 + Math.random() * 500);
             if (!gameStateRef.current.setupDone) return;
-            action = decideAI(ev, toCall, s.chips[p], s.pot, s.aiPersonalities[p], drawInfo, s.hole[p], s.community, s.ante, s.streetStartPot);
+            // 💡 맨 끝에 activeOpponentsCount를 넘겨줍니다.
+            action = decideAI(ev, toCall, s.chips[p], s.pot, s.aiPersonalities[p], drawInfo, s.hole[p], s.community, s.ante, s.streetStartPot, activeOpponentsCount);
             if (action.type === "bet" && s.chips[p] <= toCall) action = { type: "call" };
           }
 
@@ -1067,7 +1104,7 @@
         s.handResult = { logs: resultLogs, reason: "showdown" };
         s.pot = 0;
 
-        s.analysisResult = evaluateUserActions(s.userActions);
+        s.analysisResult = evaluateUserActions(s.userActions, s.ante);
         checkElimination(s);
         setGame({ ...s });
       };
@@ -1402,8 +1439,14 @@
                       {/* 💡 새로운 세로형 칩 컨트롤 UI */}
                       <div style={styles.betControlWrap}>
                         <div style={styles.betAmountDisplay}>
-                          <span style={styles.betAmountLabel}>{toCall > 0 ? "레이즈 금액" : "베팅 금액"}</span>
+                          <span style={styles.betAmountLabel}>{toCall > 0 ? "레이즈(추가) 금액" : "베팅 금액"}</span>
                           <span style={styles.betAmountValue}>{betAmount.toLocaleString()}</span>
+                          {/* 💡 추가: 레이즈 상황일 때 아래에 총 지불 금액 표시 */}
+                          {toCall > 0 && (
+                            <span style={{ fontSize: 13, color: "#D9B95C", marginTop: 6, fontWeight: 700, fontFamily: "'Courier New', monospace" }}>
+                              총 지불: {(toCall + betAmount).toLocaleString()}
+                            </span>
+                          )}
                         </div>
 
                         <div style={styles.chipColumnsWrap}>
@@ -1451,7 +1494,7 @@
                           disabled={!game.awaitingUser || !userCanRaise || userChips <= toCall}
                           onClick={() => onUserBet(betAmount)}
                         >
-                          {toCall > 0 ? "레이즈" : "베팅"} {betAmount.toLocaleString()}
+                          {toCall > 0 ? `레이즈 (총 ${(toCall + betAmount).toLocaleString()})` : `베팅 ${betAmount.toLocaleString()}`}
                         </button>
                       </div>
                     </div>
