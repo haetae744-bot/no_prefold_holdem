@@ -344,8 +344,15 @@
           if (isFlushDanger) isModerate = true;
           else isStrong = true;
         } else if (ev.cat === 3) {
-          if (isFlushDanger || isStraightDanger) isModerate = true;
-          else isStrong = true;
+          // 💡 수정: 스트리트가 아니라 '위협이 완성 가능한가'로 판단.
+          // 무늬 3장(드로우 단계)까지는 풀하우스 아웃츠를 믿고 Strong 유지.
+          // 무늬 4장(상대가 한 장만 들고 있어도 이미 플러시 완성 가능)이면 스트리트 무관하게 즉시 위험 인지.
+          const flushAlreadyMakeable = maxSuitCount >= 4;
+          if (flushAlreadyMakeable || ((isFlushDanger || isStraightDanger) && community.length === 5)) {
+            isModerate = true;
+          } else {
+            isStrong = true;
+          }
         } else if (ev.cat === 2) {
           if (isFlushDanger || isStraightDanger || boardEv.cat === 1) isModerate = true;
           else isStrong = true;
@@ -677,8 +684,8 @@
 
           case "Rock": // 바위: 절대 무리 안 함
             if (isStrong) return { type: "bet", amount: calculateBet() };
-            // 💡 수정: 상대가 블러핑 쟁이면 바위조차도 콜 기준을 관대하게 적용 (bluffCatchBonus)
-            if (isModerate && toCall > 0 && potOdds < (0.20 + bluffCatchBonus)) return { type: "call" }; 
+            // 💡 수정: 0.20은 너무 타이트. TAG(0.30)보다는 낮게 유지해서 '바위' 캐릭터성은 살리되 0.27로 완화
+            if (isModerate && toCall > 0 && potOdds < (0.27 + bluffCatchBonus)) return { type: "call" }; 
             if (toCall > 0) return { type: "fold" };
             return { type: "check" };
 
@@ -695,8 +702,8 @@
               if (toCall === 0) {
                 return Math.random() < 0.35 ? { type: "bet", amount: calculateThinBet(0.3, 0.4) } : { type: "check" };
               }
-              // 💡 수정: 블러프 캐치 보너스 반영
-              if (potOdds < (0.25 + bluffCatchBonus)) return { type: "call" }; 
+              // 💡 수정: 하프팟(0.25) 방어는 너무 타이트 → 3/4팟(0.30) 방어로 조정
+              if (potOdds < (0.30 + bluffCatchBonus)) return { type: "call" }; 
               return { type: "fold" };
             }
             if (toCall === 0 && Math.random() < 0.20 * multiwayPenalty * exploitMultiplier) return { type: "bet", amount: calculateThinBet(0.4, 0.6) };
@@ -726,8 +733,8 @@
             if (Math.random() < getNoisyThreshold(0.20, 0.10) && toCall === 0) return { type: "check" };
             return { type: "bet", amount: calculateBet() };
           }
-          // 💡 수정: 애매할 때도 상대 어그로 수치에 따라 끈질기게 콜
-          if (isModerate && toCall > 0 && potOdds < (0.25 + bluffCatchBonus)) return { type: "call" };
+          // 💡 수정: 0.25(TAG와 동일)면 캐릭터 차별화가 안 됨. TAG(0.30)보다 살짝 낮은 0.28로 완화
+          if (isModerate && toCall > 0 && potOdds < (0.28 + bluffCatchBonus)) return { type: "call" };
           // 💡 수정: 드로우 상황에서 요구되는 역전 확률 허들도 상대 어그로 수치만큼 낮춰줌
           if (toCall > 0 && drawInfo.hitChance >= (potOdds - bluffCatchBonus)) return { type: "call" };
           if (toCall > 0 && drawInfo.hitChance >= potOdds) return { type: "call" };
@@ -749,8 +756,8 @@
           if (isStrong) return { type: "bet", amount: calculateBet() };
           if (isModerate) {
             if (toCall === 0) return Math.random() < getNoisyThreshold(0.50, 0.10) ? { type: "bet", amount: calculateThinBet(0.3, 0.5) } : { type: "check" };
-            // 💡 수정: 노이즈 기준값에 보너스 합산
-            if (toCall > 0 && potOdds < getNoisyThreshold(0.25 + bluffCatchBonus, 0.05)) return { type: "call" };
+            // 💡 수정: 기존 0.25(하프팟 방어)는 너무 타이트 → 0.30(3/4팟 방어)으로 조정. 노이즈 기준값에 보너스 합산
+            if (toCall > 0 && potOdds < getNoisyThreshold(0.30 + bluffCatchBonus, 0.05)) return { type: "call" };
             return { type: "fold" };
           }
           if (toCall === 0 && Math.random() < getNoisyThreshold(0.20, 0.05) * multiwayPenalty * exploitMultiplier) return { type: "bet", amount: calculateThinBet(0.4, 0.6) };
