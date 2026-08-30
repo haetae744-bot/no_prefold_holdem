@@ -326,8 +326,9 @@
             isWeak = true;
           }
         } else {
-          isModerate = myBestKicker >= 12;
-          isWeak = !isModerate;
+          // 💡 수정: 보드와 내 패가 모두 '하이카드'일 경우, 키커가 아무리 높아도 베팅 상황에서는 '약한 패(Weak)'입니다.
+          isWeak = true;
+          isModerate = false;
         }
       }
       else {
@@ -438,7 +439,11 @@
             } else if (isWeak && outs >= 4) {
               if (potOdds > hitChance) { score = 90; comment = `${drawType}(이)었지만, 콜 비용(오즈)이 역전 확률보다 높아 합리적으로 포기했습니다.`; }
               else { score = 55; comment = `역전 확률(${Math.round(hitChance * 100)}%)이 팟 오즈보다 높았는데 너무 쉽게 포기했습니다.`; }
-            } else if (isModerate) { score = 80; comment = "원페어지만 위험이 커지는 상황을 인식하고 피해를 최소화하는 안정적인 폴드입니다."; }
+            } else if (isModerate) { 
+              score = 80; 
+              // 수정: '원페어'라고 단정 짓지 않고 실제 패 카테고리 이름(CAT_NAME)을 동적으로 불러옵니다.
+              comment = `${CAT_NAME[ev.cat]} 상태에서 위험이 커지는 상황을 인식하고 피해를 최소화하는 안정적인 폴드입니다.`; 
+            }
             else { score = 40; comment = "강력한 패를 들고 팟을 포기했습니다. 상대 블러핑에 과도하게 위축되었을 수 있습니다."; }
           }
           else if (type === "check") {
