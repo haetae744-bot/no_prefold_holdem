@@ -662,10 +662,18 @@
         switch (aiType) {
           case "Maniac": // 미치광이: 블러핑 킹
             if (isStrong) return { type: "bet", amount: calculateBet() };
+            
+            // 💡 추가: 마니악이 애매한 패(isModerate)를 들었을 때의 처리 로직
+            if (isModerate) {
+              if (toCall === 0) return Math.random() < 0.50 ? { type: "bet", amount: calculateThinBet(0.4, 0.7) } : { type: "check" };
+              if (potOdds < (0.30 + bluffCatchBonus)) return { type: "call" };
+              return { type: "fold" };
+            }
             if (isWeak && toCall === 0 && Math.random() < 0.60 * multiwayPenalty * exploitMultiplier) return { type: "bet", amount: calculateThinBet(0.5, 0.8) };
-            if (isWeak && toCall > 0 && Math.random() < 0.20 * exploitMultiplier) return { type: "bet", amount: calculateThinBet(0.5, 0.8) };
-            if (toCall > 0 && potOdds < 0.35) return { type: "call" }; // 💡 고정값 제거
-            return { type: "fold" };
+            if (isWeak && toCall > 0 && Math.random() < 0.20 * exploitMultiplier) return { type: "bet", amount: calculateThinBet(0.5, 0.8) }; 
+            if (toCall > 0 && potOdds < 0.35) return { type: "call" }; 
+            if (toCall > 0) return { type: "fold" };
+            return { type: "check" };
 
           case "Rock": // 바위: 절대 무리 안 함
             if (isStrong) return { type: "bet", amount: calculateBet() };
