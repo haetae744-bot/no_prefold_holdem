@@ -344,11 +344,7 @@
           if (isFlushDanger) isModerate = true;
           else isStrong = true;
         } else if (ev.cat === 3) {
-          // 💡 수정: 스트리트가 아니라 '위협이 완성 가능한가'로 판단.
-          // 무늬 3장(드로우 단계)까지는 풀하우스 아웃츠를 믿고 Strong 유지.
-          // 무늬 4장(상대가 한 장만 들고 있어도 이미 플러시 완성 가능)이면 스트리트 무관하게 즉시 위험 인지.
-          const flushAlreadyMakeable = maxSuitCount >= 4;
-          if (flushAlreadyMakeable || ((isFlushDanger || isStraightDanger) && community.length === 5)) {
+          if (maxSuitCount >= 4 || ((isFlushDanger || isStraightDanger) && community.length === 5)) {
             isModerate = true;
           } else {
             isStrong = true;
@@ -392,6 +388,7 @@
       if (!actions || actions.length === 0) return null;
 
       let totalScore = 0;
+      let handHasBrilliant = false; // 💡 추가: 핸드 전체에서 한 번이라도 탁월함이 있었는지 추적
       const phaseResults = [];
       const phaseNames = { flop: "플랍", turn: "턴", river: "리버" };
 
@@ -437,7 +434,7 @@
           else recommended = toCall === 0 ? "체크" : "폴드";
         }
 
-        // 💡 [기본 점수 및 코멘트 평가]
+        // 💡 [기본 점수 및 코멘트 평가] (점수 롤백: 정석=85~100, 사소한실수=60~75, 치명적실수=20~40)
         if (phase === "flop" || phase === "turn") {
           if (type === "fold") {
             if (isWeak && outs < 4) {
@@ -446,50 +443,29 @@
             } else if (isWeak && outs >= 4) {
               if (potOdds > hitChance) { score = 90; comment = `${drawType}(이)었지만, 콜 비용(오즈)이 역전 확률보다 높아 합리적으로 포기했습니다.`; }
               else { score = 55; comment = `역전 확률(${Math.round(hitChance * 100)}%)이 팟 오즈보다 높았는데 너무 쉽게 포기했습니다.`; }
-            } else if (isModerate) { 
-              score = 80; 
-              // 수정: '원페어'라고 단정 짓지 않고 실제 패 카테고리 이름(CAT_NAME)을 동적으로 불러옵니다.
-              comment = `${CAT_NAME[ev.cat]} 상태에서 위험이 커지는 상황을 인식하고 피해를 최소화하는 안정적인 폴드입니다.`; 
-            }
+            } else if (isModerate) { score = 80; comment = "원페어지만 위험이 커지는 상황을 인식하고 피해를 최소화하는 안정적인 폴드입니다."; }
             else { score = 40; comment = "강력한 패를 들고 팟을 포기했습니다. 상대 블러핑에 과도하게 위축되었을 수 있습니다."; }
           }
           else if (type === "check") {
-            if (isWeak) {
-              score = 85; comment = "불필요한 투자를 피하고 다음 카드를 무료로 보려는 팟 컨트롤입니다.";
-            }
+            if (isWeak) { score = 85; comment = "불필요한 투자를 피하고 다음 카드를 무료로 보려는 팟 컨트롤입니다."; }
             else if (isModerate) {
               if (hasGoodDraw) { score = 90; comment = "애매한 패지만 좋은 드로우를 가지고 있어 무료로 다음 카드를 보는(Free Card) 아주 좋은 판단입니다."; }
               else { score = 85; comment = "쇼다운 밸류가 있는 애매한 패로 팟 크기를 조절하는 정석적인 체크입니다."; }
             }
-            else {
-              score = 75; comment = "이미 강력한 패인데 체크를 내렸습니다. 상대가 약하게 나올 경우 밸류를 놓치는 슬로우 플레이에 주의하세요.";
-            }
+            else { score = 75; comment = "이미 강력한 패인데 체크를 내렸습니다. 상대가 약하게 나올 경우 밸류를 놓치는 슬로우 플레이에 주의하세요."; }
           }
           else if (type === "call") {
-            if (isStrong) {
-              score = 80; comment = "강한 패로 레이즈 대신 콜을 받으며 상대를 판에 깊이 끌어들였습니다.";
-            }
+            if (isStrong) { score = 80; comment = "강한 패로 레이즈 대신 콜을 받으며 상대를 판에 깊이 끌어들였습니다."; }
             else if (isModerate) {
-              // 💡 수정됨: 당장 이길 가능성(쇼다운 밸류)이 있는 애매한 패 처리
-              if (potOdds <= 0.25) {
-                score = 85; comment = "적절한 쇼다운 밸류를 가진 패로 상대의 가벼운 베팅을 무난하게 받아냈습니다.";
-              } else if (hasGoodDraw && hitChance >= potOdds) {
-                score = 95; comment = `패 강도는 애매하지만 팟 오즈 대비 높은 역전 확률(${Math.round(hitChance * 100)}%)을 근거로 한 훌륭한 콜입니다.`;
-              } else {
-                score = 55; comment = "패 강도가 애매한데 상대의 강한 베팅에 무리하게 콜을 받았습니다. 역전 확률도 부족합니다.";
-              }
+              if (potOdds <= 0.25) { score = 85; comment = "적절한 쇼다운 밸류를 가진 패로 상대의 가벼운 베팅을 무난하게 받아냈습니다."; } 
+              else if (hasGoodDraw && hitChance >= potOdds) { score = 95; comment = `패 강도는 애매하지만 팟 오즈 대비 높은 역전 확률(${Math.round(hitChance * 100)}%)을 근거로 한 훌륭한 콜입니다.`; } 
+              else { score = 55; comment = "패 강도가 애매한데 상대의 강한 베팅에 무리하게 콜을 받았습니다. 역전 확률도 부족합니다."; }
             }
             else if (outs > 0) {
-              // 💡 수정됨: 강도는 Weak하지만 드로우가 있는 경우 철저히 수학적 확률로만 계산
-              if (hitChance >= potOdds) {
-                score = 95; comment = `팟 오즈 대비 역전 확률(${Math.round(hitChance * 100)}%)이 높은 수학적으로 훌륭한 콜입니다.`;
-              } else {
-                score = 55; comment = `역전 확률(${Math.round(hitChance * 100)}%)에 비해 지불한 콜 금액이 너무 큽니다. 장기적으로 칩이 깎이는 판단입니다.`;
-              }
+              if (hitChance >= potOdds) { score = 95; comment = `팟 오즈 대비 역전 확률(${Math.round(hitChance * 100)}%)이 높은 수학적으로 훌륭한 콜입니다.`; } 
+              else { score = 55; comment = `역전 확률(${Math.round(hitChance * 100)}%)에 비해 지불한 콜 금액이 너무 큽니다. 장기적으로 칩이 깎이는 판단입니다.`; }
             }
-            else {
-              score = 30; comment = "발전 가능성(아웃츠)이 전혀 없는 약한 패로 상대방의 베팅에 끌려다녔습니다. 가장 피해야 할 플레이입니다.";
-            }
+            else { score = 30; comment = "발전 가능성(아웃츠)이 전혀 없는 약한 패로 상대방의 베팅에 끌려다녔습니다. 가장 피해야 할 플레이입니다."; }
           }
           else if (type === "bet") {
             if (isStrong) {
@@ -557,12 +533,10 @@
           }
         }
 
-
-        // 💡 [탁월(Brilliant) 보정 로직 - 수학적 오즈 계산 평가]
+        // 💡 [탁월(Brilliant) 보정 로직 - 독립 플래그로 변경]
         let isBrilliant = false;
         let brilliantReason = "";
 
-        // 1. 상대가 베팅을 했고(toCall > 0), 나에게 유의미한 발전 가능성(outs >= 4)이 있을 때만 오즈 계산 능력을 평가
         if (toCall > 0 && outs >= 4) {
           if (type === "call" && hitChance >= potOdds) {
             isBrilliant = true;
@@ -574,7 +548,8 @@
         }
 
         if (isBrilliant) {
-          score = 100;
+          score = 100; // 💡 101점으로 오버플로우 시키지 않고 100점 유지
+          handHasBrilliant = true; // 💡 탁월함 플래그 활성화
           comment = `🌟 [탁월: 정확한 오즈 계산] ${brilliantReason}`;
         }
 
@@ -585,11 +560,12 @@
       // 💡 [종합 등급 산정]
       const avgScore = Math.round(totalScore / actions.length);
       let grade = "개선 필요";
-      if (avgScore >= 95) grade = "탁월 (Brilliant) 🌟";
+      
+      if (handHasBrilliant) grade = "탁월 (Brilliant) 🌟"; // 💡 평균 점수 무관하게 덮어쓰기
       else if (avgScore >= 90) grade = "매우 좋음";
       else if (avgScore >= 80) grade = "좋음";
       else if (avgScore >= 70) grade = "준수";
-      else if (avgScore >= 60) grade = "아쉬움";
+      else grade = "아쉬움";
 
       return { avgScore, grade, phaseResults };
     }
@@ -684,7 +660,7 @@
 
           case "Rock": // 바위: 절대 무리 안 함
             if (isStrong) return { type: "bet", amount: calculateBet() };
-            // 💡 수정: 0.20은 너무 타이트. TAG(0.30)보다는 낮게 유지해서 '바위' 캐릭터성은 살리되 0.27로 완화
+            // 💡 수정: 상대가 블러핑 쟁이면 바위조차도 콜 기준을 관대하게 적용 (bluffCatchBonus)
             if (isModerate && toCall > 0 && potOdds < (0.27 + bluffCatchBonus)) return { type: "call" }; 
             if (toCall > 0) return { type: "fold" };
             return { type: "check" };
@@ -702,8 +678,8 @@
               if (toCall === 0) {
                 return Math.random() < 0.35 ? { type: "bet", amount: calculateThinBet(0.3, 0.4) } : { type: "check" };
               }
-              // 💡 수정: 하프팟(0.25) 방어는 너무 타이트 → 3/4팟(0.30) 방어로 조정
-              if (potOdds < (0.30 + bluffCatchBonus)) return { type: "call" }; 
+              // 💡 수정: 블러프 캐치 보너스 반영
+              if (potOdds < (0.3 + bluffCatchBonus)) return { type: "call" }; 
               return { type: "fold" };
             }
             if (toCall === 0 && Math.random() < 0.20 * multiwayPenalty * exploitMultiplier) return { type: "bet", amount: calculateThinBet(0.4, 0.6) };
@@ -733,11 +709,8 @@
             if (Math.random() < getNoisyThreshold(0.20, 0.10) && toCall === 0) return { type: "check" };
             return { type: "bet", amount: calculateBet() };
           }
-          // 💡 수정: 0.25(TAG와 동일)면 캐릭터 차별화가 안 됨. TAG(0.30)보다 살짝 낮은 0.28로 완화
           if (isModerate && toCall > 0 && potOdds < (0.28 + bluffCatchBonus)) return { type: "call" };
-          // 💡 수정: 드로우 상황에서 요구되는 역전 확률 허들도 상대 어그로 수치만큼 낮춰줌
           if (toCall > 0 && drawInfo.hitChance >= (potOdds - bluffCatchBonus)) return { type: "call" };
-          if (toCall > 0 && drawInfo.hitChance >= potOdds) return { type: "call" };
           if (toCall > 0) return { type: "fold" };
           return { type: "check" };
 
@@ -746,7 +719,6 @@
             if (toCall === 0 && Math.random() < getNoisyThreshold(0.30, 0.10)) return { type: "bet", amount: calculateBet() };
             return toCall > 0 ? { type: "call" } : { type: "check" };
           }
-          // 💡 수정: 콜링 스테이션이니까 콜을 좋아하지만, 아예 가망 없는 빵꾸 패로 올인은 안 받게 방어막 추가
           if (toCall > 0 && (isModerate || drawInfo.hitChance >= potOdds - 0.20)) return { type: "call" };
           if (toCall > 0) return { type: "fold" };
           return { type: "check" };
@@ -756,12 +728,10 @@
           if (isStrong) return { type: "bet", amount: calculateBet() };
           if (isModerate) {
             if (toCall === 0) return Math.random() < getNoisyThreshold(0.50, 0.10) ? { type: "bet", amount: calculateThinBet(0.3, 0.5) } : { type: "check" };
-            // 💡 수정: 기존 0.25(하프팟 방어)는 너무 타이트 → 0.30(3/4팟 방어)으로 조정. 노이즈 기준값에 보너스 합산
             if (toCall > 0 && potOdds < getNoisyThreshold(0.30 + bluffCatchBonus, 0.05)) return { type: "call" };
             return { type: "fold" };
           }
           if (toCall === 0 && Math.random() < getNoisyThreshold(0.20, 0.05) * multiwayPenalty * exploitMultiplier) return { type: "bet", amount: calculateThinBet(0.4, 0.6) };
-          // 💡 수정: 드로우(역전 확률)로 콜을 받을 때도 보너스 합산
           if (toCall > 0 && drawInfo.hitChance >= (potOdds - bluffCatchBonus)) return { type: "call" };
           if (toCall > 0) return { type: "fold" };
           return { type: "check" };
@@ -1063,8 +1033,10 @@
 
       const finishByFold = async s => {
         const winner = s.players.find(p => !s.folded[p]);
-        if (winner === "user") playSound('win', isMuted);
-        s.handWinners = { [winner]: s.pot }; // 💡 딱 이 한 줄을 추가!
+        const isUserWinner = winner === "user"; // 💡 유저 승리 여부 저장
+
+        if (isUserWinner) playSound('win', isMuted);
+        s.handWinners = { [winner]: s.pot }; 
         s.chips[winner] += s.pot;
         pushLog(s, `${s.names[winner]} 승리! (모두 폴드, 팟 ${s.pot} 획득)`);
 
@@ -1074,6 +1046,12 @@
         s.pot = 0;
 
         s.analysisResult = evaluateUserActions(s.userActions, s.ante);
+
+        // 💡 추가: 유저가 졌거나 폴드했더라도 탁월한 플레이(Brilliant)를 했다면 win 사운드 보상 제공
+        if (!isUserWinner && s.analysisResult && s.analysisResult.grade.includes("Brilliant")) {
+          playSound('win', isMuted);
+        }
+
         checkElimination(s);
         setGame({ ...s });
       };
@@ -1154,12 +1132,20 @@
           pushLog(s, `${potLabel} 분배: ${winnerNames} (+${share}${hasRemainder ? ' 및 칩 보정' : ''})`);
         });
 
-        if (allWinners.has("user")) playSound('win', isMuted);
+        const isUserWinner = allWinners.has("user"); // 💡 유저 승리 여부 저장
+
+        if (isUserWinner) playSound('win', isMuted);
         s.lastWinner = Array.from(allWinners)[0];
         s.handResult = { logs: resultLogs, reason: "showdown" };
         s.pot = 0;
 
-        s.analysisResult = evaluateUserActions(s.userActions, s.ante);
+        s.analysisResult = evaluateUserActions(s.userActions, s.ante); // 기존 누락되어 있던 s.ante 파라미터도 함께 픽스
+        
+        // 💡 추가: 유저가 쇼다운에서 패배했더라도 탁월한 플레이를 했다면 사운드 재생
+        if (!isUserWinner && s.analysisResult && s.analysisResult.grade.includes("Brilliant")) {
+          playSound('win', isMuted);
+        }
+
         checkElimination(s);
         setGame({ ...s });
       };
