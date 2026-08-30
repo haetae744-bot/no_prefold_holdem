@@ -810,8 +810,8 @@
         handNum: 0,
         lastWinner: null,
         handWinners: {}, // 새로 추가: 승리자와 획득 금액을 기록하는 객체
-        // 💡 수정: totalActions와 aggressiveActions 카운트 추가
         opponentRead: { betsFaced: 0, foldsToBet: 0, totalActions: 0, aggressiveActions: 0 },
+        revealCards: false, //추가: 패 공개 여부 추적
       };
     }
 
@@ -1228,6 +1228,7 @@
         s.handResult = null;
         s.userActions = [];
         s.analysisResult = null;
+        s.revealCards = false;
         s.started = true;
 
         players.forEach(p => { if (s.eliminated[p]) s.folded[p] = true; });
@@ -1463,6 +1464,17 @@
                   {game.started && (game.phase === "showdown" || game.phase === "foldwin") && !game.over && (
                     <div style={styles.resultWrap}>
                       <ResultBanner game={game} />
+                      
+                      {/* 💡 추가: 전원 폴드로 끝났고 아직 패를 공개하지 않았다면 버튼 표시 */}
+                      {game.phase === "foldwin" && !game.revealCards && (
+                        <button 
+                          style={{ ...styles.analysisBtn, marginTop: 12 }} 
+                          onClick={() => setGame(g => ({ ...g, revealCards: true }))}
+                        >
+                          👀 상대 패 확인하기
+                        </button>
+                      )}
+                      
                       <button style={{ ...styles.primaryBtn, marginTop: 16 }} onClick={playHand}>다음 핸드</button>
                     </div>
                   )}
@@ -1567,7 +1579,7 @@
     function AiSeat({ id, game }) {
       const folded = game.folded[id];
       const eliminated = game.eliminated[id];
-      const showCards = (game.phase === "showdown") && !folded;
+      const showCards = (game.phase === "showdown" && !folded) || game.revealCards;
       const hole = game.hole[id];
       const isCurrent = game.currentActor === id;
 
