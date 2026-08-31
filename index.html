@@ -353,10 +353,25 @@
           if (isFlushDanger || isStraightDanger || boardEv.cat === 1) isModerate = true;
           else isStrong = true;
         } else if (ev.cat === 1) {
-          if (ev.tiebreak[0] >= 10 && !isFlushDanger && !isStraightDanger) isModerate = true;
-          else isWeak = true;
+          // 💡 [수정됨] 무조건 10 이상이 아니라 보드(Board) 랭크와 비교하여 탑/미들 페어를 인지합니다.
+          const boardRanksDesc = [...new Set(community.map(c => c.rank))].sort((a, b) => b - a);
+          const topBoardRank = boardRanksDesc[0] || 0;
+          const secondBoardRank = boardRanksDesc[1] || 0;
+          const myPairRank = ev.tiebreak[0];
+
+          if (myPairRank >= topBoardRank) {
+            if (isFlushDanger && community.length === 5) isWeak = true;
+            else isModerate = true;
+          } else if (myPairRank >= secondBoardRank) {
+            if (isFlushDanger || isStraightDanger) isWeak = true;
+            else isModerate = true; // 미들 페어도 쇼다운 밸류가 있으므로 Moderate에 편입 (퓨어 블러핑 취급 X)
+          } else {
+            isWeak = true; // 바텀 페어 및 이하는 여전히 Weak
+          }
         } else {
+          // 💡 [수정됨] 보드와 내 패가 모두 하이카드일 때 키커 오류 방지
           isWeak = true;
+          isModerate = false;
         }
       }
 
@@ -422,10 +437,12 @@
         if (phase === "flop" || phase === "turn") {
           if (isStrong) recommended = toCall > 0 ? `레이즈 (${strongRange})` : `베팅 (${strongRange})`;
           else if (isModerate) {
-            if (toCall === 0) recommended = "체크 (팟 컨트롤)";
+            // 💡 [수정됨] 씬 밸류벳 추천 텍스트 추가 (AI와 잣대 통일)
+            if (toCall === 0) recommended = "체크 (팟 컨트롤) 또는 베팅 (씬 밸류)";
             else recommended = (potOdds <= 0.25 || (hasGoodDraw && hitChance >= potOdds)) ? "콜" : "폴드";
           } else {
-            if (toCall === 0) recommended = hasGoodDraw ? `베팅 (세미 블러프, ${bluffRange})` : "체크";
+            // 💡 [수정됨] 빵꾸(outs >= 4)도 세미 블러핑 옵션으로 인정
+            if (toCall === 0) recommended = outs >= 4 ? `베팅 (세미 블러프, ${bluffRange}) 또는 체크` : "체크";
             else recommended = (outs >= 4 && hitChance >= potOdds) ? "콜" : "폴드";
           }
         } else if (phase === "river") {
@@ -480,14 +497,19 @@
             }
             else {
               if (hasGoodDraw) {
-                if (betRatio >= 0.5 && betRatio <= 0.8) { score = 95; comment = `좋은 드로우를 바탕으로 팟의 50~80%를 때리는 아주 날카로운 세미-블러프입니다.`; }
-                else { score = 85; comment = `${drawType}을 활용한 세미-블러프는 좋았으나, 베팅 사이즈가 정석 범위(50~80%)를 벗어났습니다.`; }
+                if (betRatio >= 0.5 && betRatio <= 0.8) { score = 100; comment = `좋은 드로우를 바탕으로 팟의 50~80%를 때리는 아주 날카로운 세미-블러프입니다.`; }
+                else { score = 90; comment = `${drawType}을 활용한 세미-블러프는 좋았으나, 베팅 사이즈가 정석 범위(50~80%)를 벗어났습니다.`; }
               }
-              else if (opponentsCount >= 2) { score = 40; comment = "상대가 여럿 남은 상황에서 아웃츠도 없는 퓨어 블러핑은 자살 행위에 가깝습니다."; }
-              else if (toCall > 0) { score = 45; comment = "상대방이 먼저 베팅으로 힘을 과시했는데 빈 패로 맞불(재레이즈)을 놓은 무리한 플레이입니다."; }
+              // 💡 [수정됨] 아웃츠 4~7개(빵꾸 등)를 '아웃츠 없는 퓨어 블러핑'에서 구출하여 세미 블러프로 고평가
+              else if (outs >= 4) {
+                if (betRatio >= 0.4 && betRatio <= 0.8) { score = 95; comment = `${drawType} 가능성을 활용한 찌르기(세미 블러프)입니다. 공격적인 정석 플레이입니다.`; }
+                else { score = 85; comment = `${drawType} 상태에서 베팅을 시도했으나, 상대방에게 압박을 주기엔 사이즈가 다소 아쉽습니다.`; }
+              }
+              else if (opponentsCount >= 2) { score = 70; comment = "상대가 여럿 남은 상황에서 진짜 아웃츠가 하나도 없는 퓨어 블러핑은 위험도가 높습니다."; }
+              else if (toCall > 0) { score = 75; comment = "상대방이 먼저 베팅으로 힘을 과시했는데 빈 패로 맞불(재레이즈)을 놓은 무리한 플레이입니다."; }
               else {
-                if (betRatio >= 0.5 && betRatio <= 0.8) { score = 85; comment = "1:1 상황에서 타이밍을 뺏는 과감하고 정교한 블러핑입니다."; }
-                else { score = 70; comment = "블러핑을 시도했으나 사이즈가 정석(팟의 50~80%)을 벗어났습니다. 상대가 의도를 눈치챌 수 있습니다."; }
+                if (betRatio >= 0.5 && betRatio <= 0.8) { score = 95; comment = "1:1 상황에서 타이밍을 뺏는 과감하고 정교한 블러핑입니다."; }
+                else { score = 80; comment = "블러핑을 시도했으나 사이즈가 정석(팟의 50~80%)을 벗어났습니다. 상대가 의도를 눈치챌 수 있습니다."; }
               }
             }
           }
