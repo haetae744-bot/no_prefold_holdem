@@ -218,10 +218,13 @@
       return false;
     }
 
-    function calculateDrawOuts(cards) {
-      if (cards.length >= 7) {
+    // 💡 수정: 홀카드와 커뮤니티 카드를 분리해서 받아 오버카드를 정확히 인식하게 합니다.
+    function calculateDrawOuts(hole, community) {
+      const cards = [...hole, ...community];
+      if (community.length >= 5 || community.length === 0) {
         return { outs: 0, hitChance: 0, drawType: "리버(추가 카드 없음)" };
       }
+      
       const currentEv = evaluateBest(cards);
       if (currentEv.cat >= 4) return { outs: 0, hitChance: 0, drawType: "메이드(완성)" };
 
@@ -235,26 +238,49 @@
 
       let flushOuts = 0;
       let straightOuts = 0;
+      let holeCardOuts = 0; // 💡 홀카드가 맞아 페어/셋으로 발전하는 아웃츠
+
+      const myHoleRanks = hole.map(c => c.rank);
 
       for (const card of deck) {
         const testCards = [...cards, card];
         const ev = evaluateBest(testCards);
+        
+        // 플러시나 스트레이트로 발전하는 아웃츠
         if (ev.cat === 5 || ev.cat === 8) flushOuts++;
         else if (ev.cat === 4) straightOuts++;
+        // 💡 핵심 추가: 내 홀카드와 맞아서 현재 상태보다 족보가 높아지는 아웃츠(오버카드, 페어->셋 등)
+        else if (ev.cat > currentEv.cat && myHoleRanks.includes(card.rank)) {
+          holeCardOuts++;
+        }
       }
 
-      const outs = flushOuts + straightOuts;
+      const totalOuts = flushOuts + straightOuts + holeCardOuts;
+      
       let drawType = "없음";
-      if (flushOuts >= 9) drawType = "플러시 드로우";
+      if (flushOuts >= 9 && straightOuts > 0) drawType = "플러시 & 스트레이트 복합 드로우";
+      else if (flushOuts >= 9) drawType = "플러시 드로우";
       else if (straightOuts >= 8) drawType = "양빵(오픈엔디드) 드로우";
       else if (straightOuts > 0) drawType = "빵꾸(거츠샷) 드로우";
-      else if (outs > 0) drawType = "마이너 드로우";
+      else if (holeCardOuts >= 6) drawType = "투 오버카드 (탑페어 드로우)";
+      else if (holeCardOuts > 0) drawType = "페어/셋 발전 드로우";
+      else if (totalOuts > 0) drawType = "마이너 드로우";
 
-      const cardsLeft = 7 - cards.length;
-      const multiplier = cardsLeft === 2 ? 4 : (cardsLeft === 1 ? 2 : 0);
-      const hitChance = Math.min(100, outs * multiplier) / 100;
+      // 💡 4/2 룰 폐기 -> 정확한 수학적 확률(Hypergeometric) 계산 도입
+      const cardsLeft = 5 - community.length; // 플랍은 2장, 턴은 1장 남음
+      const unseenCards = deck.length; // 남은 덱 장수 (47장 또는 46장)
+      let hitChance = 0;
 
-      return { outs, hitChance, drawType };
+      if (cardsLeft === 1) {
+        hitChance = totalOuts / unseenCards;
+      } else if (cardsLeft === 2) {
+        // 1 - (턴과 리버에서 모두 아웃츠가 안 뜰 확률)
+        const miss1 = (unseenCards - totalOuts) / unseenCards;
+        const miss2 = (unseenCards - 1 - totalOuts) / (unseenCards - 1);
+        hitChance = 1 - (miss1 * miss2);
+      }
+
+      return { outs: totalOuts, hitChance, drawType };
     }
 
     function getRelativeStrength(ev, hole, community, toCall, pot) {
@@ -968,7 +994,8 @@
 
           const currentCards = [...s.hole[p], ...s.community];
           const ev = evaluateBest(currentCards);
-          const drawInfo = calculateDrawOuts(currentCards);
+          // 💡 파라미터를 홀카드와 커뮤니티 카드로 분리해서 넘겨줍니다.
+          const drawInfo = calculateDrawOuts(s.hole[p], s.community);
           // 💡 수정: if/else 양쪽(유저·AI)에서 모두 쓸 수 있도록 상단으로 이동, 기준도 p 본인 제외로 일반화
           const activeOpponentsCount = players.filter(opp => !s.folded[opp] && !s.eliminated[opp] && opp !== p).length;
 
@@ -1499,6 +1526,17 @@
                       <div style={styles.gameOverText}>게임 오버 — 칩을 모두 잃었습니다</div>
                       {/* 💡 수정: 마지막 핸드의 분석 결과가 있다면 피드백을 보여줌 */}
                       {game.analysisResult && <ResultBanner game={game} />}
+                      
+                      {/* 💡 추가: 게임 오버 상태에서도 덮여있는 AI의 패를 깔 수 있도록 버튼 삽입 */}
+                      {!game.revealCards && (
+                        <button 
+                          style={{ ...styles.analysisBtn, marginTop: 12, marginBottom: 4 }} 
+                          onClick={() => setGame(g => ({ ...g, revealCards: true }))}
+                        >
+                          👀 숨겨진 패 확인하기
+                        </button>
+                      )}
+
                       <button style={{ ...styles.primaryBtn, marginTop: 16 }} onClick={handleReset}>처음 화면으로</button>
                     </div>
                   )}
