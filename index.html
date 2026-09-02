@@ -400,7 +400,7 @@
           isModerate: ev.cat === 1 && ev.tiebreak[0] >= 10,
           isWeak: ev.cat === 0 || (ev.cat === 1 && ev.tiebreak[0] < 10),
           isBoardHeavy: false,
-          reasonText: `내 핸드: ${CAT_NAME[ev.cat]}`
+          contextText: `내 핸드: ${CAT_NAME[ev.cat]}`
         };
       }
 
@@ -585,8 +585,28 @@
         reasons.push(positionLabel);
       }
 
-      const reasonText = reasons.filter(Boolean).join(" · ");
-      return { isStrong, isModerate, isWeak, isBoardHeavy, reasonText, hasKeyBlocker: blockers.hasKeyBlocker };
+      // 💡 수정: 'reasonText'였던 필드를 'contextText'로 재정의.
+      // SPR/포지션/보드 위협/핸드-보드 비교/블로커 등, 모두 '결정을 내리기 전 상황을 설명하는 사실'이므로
+      // 이제 이 값은 코멘트 끝에 괄호로 덧붙이는 게 아니라 코멘트 맨 앞의 '상황 도입부' 문장으로 조립된다.
+      const contextText = reasons.filter(Boolean).join(", ");
+      return { isStrong, isModerate, isWeak, isBoardHeavy, contextText, hasKeyBlocker: blockers.hasKeyBlocker };
+    }
+
+    // 💡 추가: 상황 도입부(Context) 문장 조립. SPR/포지션/보드 위협 등 '결정 전 상황'을 자연스러운
+    // 도입 절로 만들어 코멘트의 맨 앞에 배치한다.
+    function buildContextIntro(contextText) {
+      if (!contextText) return "";
+      return `${contextText} 상황에서, `;
+    }
+
+    // 💡 추가: 결론(Conclusion) 문장 조립. 최종 점수에 따라 코멘트 맨 끝에 붙는 뉘앙스를 결정한다.
+    function buildConclusion(score) {
+      if (score >= 95) return "여러모로 흠잡을 데 없는 판단입니다.";
+      if (score >= 85) return "정석에 부합하는 훌륭한 플레이입니다.";
+      if (score >= 70) return "무난하고 합리적인 선택입니다.";
+      if (score >= 55) return "장기적으로는 아쉬움이 남는 판단입니다.";
+      if (score >= 40) return "위험 부담이 꽤 큰 플레이였습니다.";
+      return "장기적으로 칩을 깎아먹는 명백한 실수에 가깝습니다.";
     }
 
     //최소 오프닝 베팅 계산 (25% 룰 및 100단위 CEIL)
@@ -630,7 +650,7 @@
         let score = 70;
         let comment = "판단 보류 (정보 부족)";
 
-        const { isStrong, isModerate, isWeak, isBoardHeavy, reasonText, hasKeyBlocker } = getRelativeStrength(ev, hole, community, toCall, pot, spr, positionLabel);
+        const { isStrong, isModerate, isWeak, isBoardHeavy, contextText, hasKeyBlocker } = getRelativeStrength(ev, hole, community, toCall, pot, spr, positionLabel);
 
         const potOdds = toCall > 0 ? toCall / (pot + toCall) : 0;
         const betRatio = investedAmount / (pot || 1);
@@ -880,13 +900,13 @@
           }
         }
 
-        // 💡 추가: 어떤 분기를 타든, 판정 근거(보드 대비 내 패 비교)를 항상 코멘트 끝에 덧붙임
-        if (reasonText) {
-          comment = `${comment} (근거: ${reasonText})`;
-        }
-        if (barrelNote) {
-          comment = `${comment} [배럴링: ${barrelNote}]`;
-        }
+        // 💡 수정: 기존의 "(근거: ...) [배럴링: ...]" 브라켓 부착 방식을 버리고,
+        // 상황 도입부(Context) → 행동 평가(Action) → 결론(Conclusion) 3단 구조로 자연스럽게 조립한다.
+        // - Context: SPR/포지션/보드 위협/핸드-보드 비교 등 '결정을 내리기 전 상황' (buildContextIntro)
+        // - Action: 각 분기가 정한 구체적 전술 평가(comment) + 배럴링 코멘트(barrelNote)
+        // - Conclusion: 최종 점수에 따른 뉘앙스 (buildConclusion)
+        const actionSentence = barrelNote ? `${comment} ${barrelNote}.` : comment;
+        comment = `${buildContextIntro(contextText)}${actionSentence} ${buildConclusion(score)}`;
 
         totalScore += score;
         phaseResults.push({ phase: phaseNames[phase] || phase, score, comment, recommended, type, recommendedType });
