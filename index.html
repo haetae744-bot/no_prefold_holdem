@@ -72,7 +72,18 @@
     // localStorage에 저장해 브라우저를 새로고침/재방문해도 이어지도록 함.
     const META_STORAGE_KEY = "noPreflopHoldem_meta_v1";
     const DEFAULT_BANKROLL = 100000;
-    const BUYIN_PRESETS = [10000, 30000, 50000, 100000];
+    const BUYIN_PRESETS = [10000, 50000, 100000, 500000, 1000000];
+    // 💡 수정: 프리셋별로 필요한 최소 뱅크롤(잠금 해제 기준)을 개별 지정.
+    // 1만은 프리셋 금액 자체가 기준(항상 그만큼은 있어야 함). 나머지도 전부 프리셋 금액 이상으로 맞춰서
+    // '잠금은 풀렸는데 실제로는 다 못 채우는' 경우가 원천적으로 안 생기게 했다.
+    // (그래도 혹시 모를 상황을 대비해 beginSetupGame의 실제 차감액은 min(프리셋, 뱅크롤)로 한 번 더 캡을 씌워둔다)
+    const BUYIN_THRESHOLDS = {
+      10000: 10000,
+      50000: 100000,
+      100000: 150000,
+      500000: 600000,
+      1000000: 1200000,
+    };
     const CHART_SHEET_PRICE = 20000;
 
     function loadMeta() {
@@ -107,8 +118,9 @@
       }
     });
 
-    const playSound = (type, isMuted) => {
-      if (isMuted || !audios[type]) return;
+    const playSound = (type, mutedBgm, mutedSfx) => {
+      const isThisMuted = type === 'bgm' ? mutedBgm : mutedSfx;
+      if (isThisMuted || !audios[type]) return;
       if (type !== 'bgm') {
         // 효과음은 겹쳐서 재생될 수 있도록 복제해서 실행
         const sound = audios[type].cloneNode();
@@ -1285,13 +1297,41 @@
     function NoPreflopHoldem() {
       const [game, setGame] = useState(initialGame());
       const [betAmount, setBetAmount] = useState(initialGame().ante * 5);
-      const [isMuted, setIsMuted] = useState(false);
+      const [isMutedBgm, setIsMutedBgm] = useState(false); // 💡 수정: 배경음악 음소거를 효과음과 분리
+      const [isMutedSfx, setIsMutedSfx] = useState(false); // 💡 추가: 효과음 음소거
       const [practiceMode, setPracticeMode] = useState(false); // 💡 추가: 연습 모드 (실시간 팟오즈/아웃츠 표시)
       const [showStats, setShowStats] = useState(false); // 💡 추가: 누적 통계 패널 토글
       // 💡 추가: 바이인 시스템 - 뱅크롤/차트시트 소유 여부. localStorage에서 초기 로드.
       const [meta, setMeta] = useState(() => loadMeta());
       // 메타 상태가 바뀔 때마다 자동으로 localStorage에 저장
       useEffect(() => { saveMeta(meta); }, [meta]);
+      // 💡 추가: window.confirm/alert 대신 쓰는 사이트 내 모달 상태.
+      // onConfirm이 있으면 '취소/확인' 두 버튼(확인 다이얼로그), 없으면 '확인' 한 버튼(알림)만 표시.
+      const [modal, setModal] = useState(null); // { message, onConfirm?: fn } | null
+      const askConfirm = (message, onConfirm) => setModal({ message, onConfirm });
+      const showAlert = message => setModal({ message, onConfirm: null });
+      const modalOverlay = modal && (
+        <div style={styles.modalOverlay} onClick={() => setModal(null)}>
+          <div style={styles.modalBox} onClick={e => e.stopPropagation()}>
+            <div style={styles.modalMessage}>{modal.message}</div>
+            <div style={styles.modalButtons}>
+              {modal.onConfirm && (
+                <button style={styles.modalCancelBtn} onClick={() => setModal(null)}>취소</button>
+              )}
+              <button
+                style={styles.modalConfirmBtn}
+                onClick={() => {
+                  const fn = modal.onConfirm;
+                  setModal(null);
+                  if (fn) fn();
+                }}
+              >
+                확인
+              </button>
+            </div>
+          </div>
+        </div>
+      );
       const gameStateRef = useRef(game);
       const runningRef = useRef(false);
       const userResolveRef = useRef(null);
@@ -1299,12 +1339,12 @@
 
       // [새로 추가] 게임이 시작되거나 음소거가 풀리면 BGM 재생
       useEffect(() => {
-        if (game.setupDone && !isMuted) {
-          playSound('bgm', isMuted);
+        if (game.setupDone && !isMutedBgm) {
+          playSound('bgm', isMutedBgm, isMutedSfx);
         } else {
           stopBGM();
         }
-      }, [game.setupDone, isMuted]);
+      }, [game.setupDone, isMutedBgm]);
       useEffect(() => { gameStateRef.current = game; }, [game]);
       useEffect(() => {
         if (logEndRef.current) logEndRef.current.scrollTop = logEndRef.current.scrollHeight;
@@ -1335,7 +1375,7 @@
         const confirmMsg = cashOut > 0
           ? `테이블에서 퇴장하고 칩 ${cashOut.toLocaleString()}을 뱅크롤에 반영하시겠습니까?`
           : "테이블에서 퇴장하시겠습니까?";
-        if (window.confirm(confirmMsg)) {
+        askConfirm(confirmMsg, () => {
           const newBankroll = meta.bankroll + cashOut;
           setMeta(m => ({ ...m, bankroll: newBankroll }));
           setGame(g => {
@@ -1343,8 +1383,9 @@
             // 여전히 감당 가능하면 그대로 유지하고, 아니면 감당 가능한 것 중 가장 큰 값(또는 전액)으로 보정한다.
             // 이렇게 안 하면 바이인 화면에서 선택 불가능한 값이 그대로 남아 '게임 시작'을 눌러도 조용히 아무
             // 일도 안 일어나는 버그가 생긴다.
-            const affordablePresets = BUYIN_PRESETS.filter(p => p <= newBankroll);
-            const stillAffordable = BUYIN_PRESETS.includes(g.startingChips) && g.startingChips <= newBankroll;
+            // 💡 수정: 프리셋 금액이 아니라 잠금 해제 기준(BUYIN_THRESHOLDS)으로 감당 가능 여부를 판단해야 함
+            const affordablePresets = BUYIN_PRESETS.filter(p => newBankroll >= BUYIN_THRESHOLDS[p]);
+            const stillAffordable = BUYIN_PRESETS.includes(g.startingChips) && newBankroll >= BUYIN_THRESHOLDS[g.startingChips];
             const safeBuyIn = stillAffordable
               ? g.startingChips
               : (affordablePresets.length > 0 ? affordablePresets[affordablePresets.length - 1] : Math.max(0, newBankroll));
@@ -1357,18 +1398,18 @@
             userResolveRef.current({ type: "fold" });
             userResolveRef.current = null;
           }
-        }
+        });
       };
 
       // 💡 추가: 뱅크롤이 완전히 바닥났을 때(더 이상 어떤 바이인도 불가능할 때)만 쓰는 진짜 초기화.
       // 차트 시트 구매 여부는 유지하고 뱅크롤만 기본값으로 되돌린다.
       const handleFullReset = () => {
-        if (window.confirm(`뱅크롤을 ${DEFAULT_BANKROLL.toLocaleString()}으로 되돌리고 처음부터 다시 시작하시겠습니까?`)) {
+        askConfirm(`뱅크롤을 ${DEFAULT_BANKROLL.toLocaleString()}으로 되돌리고 처음부터 다시 시작하시겠습니까?`, () => {
           setMeta(m => ({ ...m, bankroll: DEFAULT_BANKROLL }));
           setGame(initialGame());
           setBetAmount(initialGame().ante * 5);
           runningRef.current = false;
-        }
+        });
       };
 
       // 💡 추가: 파산한 AI 좌석에 유저가 직접 '새 AI 참가'를 눌렀을 때 호출됨.
@@ -1413,18 +1454,18 @@
         let isFullRaise = false; //추가: 정상 금액을 채운 레이즈인가?
 
         if (action.type === "fold") {
-          playSound('fold', isMuted);
+          playSound('fold', isMutedBgm, isMutedSfx);
           s.folded[player] = true;
           s.lastAction[player] = "폴드";
           pushLog(s, `${name}: 폴드`);
           s.streetActions[player] = { type: "fold", amount: 0 };
         } else if (action.type === "check") {
-          playSound('check', isMuted);
+          playSound('check', isMutedBgm, isMutedSfx);
           s.lastAction[player] = "체크";
           pushLog(s, `${name}: 체크`);
           s.streetActions[player] = { type: "check", amount: 0 };
         } else if (action.type === "call") {
-          playSound('call', isMuted);
+          playSound('call', isMutedBgm, isMutedSfx);
           const amt = Math.max(0, Math.min(toCall, s.chips[player]));
           s.chips[player] -= amt; s.pot += amt;
           s.roundBets[player] += amt; s.invested[player] += amt;
@@ -1433,7 +1474,7 @@
           pushLog(s, `${name}: 콜 (${amt})`);
           s.streetActions[player] = { type: "call", amount: amt };
         } else if (action.type === "bet") {
-          playSound('bet', isMuted);
+          playSound('bet', isMutedBgm, isMutedSfx);
 
           // 오프닝 vs 레이즈에 따른 최소 요구치 계산
           const isOpening = s.currentBet === 0;
@@ -1636,7 +1677,7 @@
         const winner = s.players.find(p => !s.folded[p]);
         const isUserWinner = winner === "user"; // 💡 유저 승리 여부 저장
 
-        if (isUserWinner) playSound('win', isMuted);
+        if (isUserWinner) playSound('win', isMutedBgm, isMutedSfx);
         s.handWinners = { [winner]: s.pot }; 
         s.chips[winner] += s.pot;
         pushLog(s, `${s.names[winner]} 승리! (모두 폴드, 팟 ${s.pot} 획득)`);
@@ -1651,7 +1692,7 @@
 
         // 💡 추가: 유저가 졌거나 폴드했더라도 탁월한 플레이(Brilliant)를 했다면 win 사운드 보상 제공
         if (!isUserWinner && s.analysisResult && s.analysisResult.grade.includes("Brilliant")) {
-          playSound('win', isMuted);
+          playSound('win', isMutedBgm, isMutedSfx);
         }
 
         checkElimination(s);
@@ -1736,7 +1777,7 @@
 
         const isUserWinner = allWinners.has("user"); // 💡 유저 승리 여부 저장
 
-        if (isUserWinner) playSound('win', isMuted);
+        if (isUserWinner) playSound('win', isMutedBgm, isMutedSfx);
         s.lastWinner = Array.from(allWinners)[0];
         s.handResult = { logs: resultLogs, reason: "showdown" };
         s.pot = 0;
@@ -1746,7 +1787,7 @@
         
         // 💡 추가: 유저가 쇼다운에서 패배했더라도 탁월한 플레이를 했다면 사운드 재생
         if (!isUserWinner && s.analysisResult && s.analysisResult.grade.includes("Brilliant")) {
-          playSound('win', isMuted);
+          playSound('win', isMutedBgm, isMutedSfx);
         }
 
         checkElimination(s);
@@ -1766,15 +1807,17 @@
             s.over = true;
             s.gameWon = true;
             pushLog(s, `🏆 모든 상대를 파산시키고 최종 승리했습니다! (최종 칩 ${s.chips.user.toLocaleString()})`);
-            playSound('win', isMuted);
+            playSound('win', isMutedBgm, isMutedSfx);
           }
         }
       };
 
       const beginSetupGame = () => {
-        // 💡 추가: 바이인을 뱅크롤에서 차감 (뱅크롤보다 큰 바이인은 UI에서 이미 막아뒀지만 방어적으로 한 번 더 확인)
-        const buyIn = game.startingChips;
-        if (buyIn > meta.bankroll) return;
+        // 💡 수정: 실제 차감/시작 금액은 min(선택한 프리셋, 뱅크롤)로 캡을 씌운다.
+        // (버튼은 UI에서 잠금 여부로 이미 막아뒀지만, 100만 프리셋처럼 잠금 기준이 프리셋 금액보다 낮게
+        // 설정된 경우 뱅크롤이 프리셋에 못 미칠 수 있어 방어적으로 캡을 둔다)
+        const buyIn = Math.min(game.startingChips, meta.bankroll);
+        if (buyIn <= 0) return;
         setMeta(m => ({ ...m, bankroll: m.bankroll - buyIn }));
 
         setGame(g => {
@@ -1797,12 +1840,12 @@
             ...initialGame(),
             setupDone: true,
             aiCount: g.aiCount,
-            ante: g.ante,                   // 💡 추가: 사용자가 설정한 앤티 유지
-            startingChips: g.startingChips, // 💡 추가: 사용자가 설정한 시작 자금 유지
+            ante: g.ante,       // 💡 추가: 사용자가 설정한 앤티 유지
+            startingChips: buyIn, // 💡 수정: 캡이 적용된 실제 바이인 금액 사용
             players,
             names,
             aiPersonalities,
-            chips: makeDict(players, g.startingChips),
+            chips: makeDict(players, buyIn),
             invested: makeDict(players, 0),
             folded: makeDict(players, false),
             eliminated: makeDict(players, false),
@@ -1830,7 +1873,7 @@
         s.log = [...s.log];
         s.handNum += 1;
         s.deck = shuffle(freshDeck());
-        playSound('shuffle', isMuted);
+        playSound('shuffle', isMutedBgm, isMutedSfx);
         s.community = [];
         s.hole = {};
         s.folded = makeDict(players, false);
@@ -1977,14 +2020,15 @@
                 <p style={styles.setupDesc}>더 이상 어떤 바이인도 선택할 수 없어요.<br />뱅크롤을 초기화하고 처음부터 다시 시작할 수 있습니다.</p>
                 <button style={{ ...styles.primaryBtn, marginTop: 12 }} onClick={handleFullReset}>뱅크롤 초기화하고 다시 시작</button>
               </div>
+              {modalOverlay}
             </div>
           );
         }
 
         // 💡 수정: 앤티는 '바이인의 10%'가 상한이며, 아주 적은 바이인에서도 최소 100은 보장한다.
         const maxAnte = Math.max(100, Math.floor((game.startingChips * 0.1) / 100) * 100);
-        const availablePresets = BUYIN_PRESETS.filter(p => p <= meta.bankroll);
-        const showAllInOption = availablePresets.length === 0; // 뱅크롤이 가장 낮은 프리셋보다도 적을 때
+        // 💡 수정: 뱅크롤이 가장 낮은 프리셋(1만)보다도 적을 때만 '전액' 특수 옵션을 보여준다.
+        const showAllInOption = meta.bankroll < BUYIN_PRESETS[0];
 
         const selectBuyIn = amount => {
           setGame(g => {
@@ -1993,12 +2037,25 @@
           });
         };
 
+        // 💡 추가: 좌우 화살표로 넘기는 캐러셀 - 현재 game.startingChips가 가리키는 프리셋 인덱스를 찾는다.
+        const presetIdx = Math.max(0, BUYIN_PRESETS.indexOf(game.startingChips));
+        const currentPreset = BUYIN_PRESETS[presetIdx];
+        const currentThreshold = BUYIN_THRESHOLDS[currentPreset];
+        const isBuyInUnlocked = meta.bankroll >= currentThreshold;
+        // 💡 주의: 100만 프리셋처럼 '잠금 해제 기준(80만)'이 프리셋 금액(100만)보다 낮게 설정된 경우를 대비해,
+        // 실제로 차감/시작될 금액은 항상 min(프리셋, 뱅크롤)로 캡을 씌운다.
+        const effectiveBuyIn = Math.min(currentPreset, meta.bankroll);
+        const cycleBuyIn = direction => {
+          const nextIdx = Math.max(0, Math.min(BUYIN_PRESETS.length - 1, presetIdx + direction));
+          selectBuyIn(BUYIN_PRESETS[nextIdx]);
+        };
+
         const canBuyChartSheet = !meta.ownsChartSheet && meta.bankroll >= CHART_SHEET_PRICE;
         const buyChartSheet = () => {
           if (!canBuyChartSheet) return;
-          if (window.confirm(`차트 시트를 ${CHART_SHEET_PRICE.toLocaleString()}에 구매하시겠습니까? (뱅크롤에서 차감, 영구 소유)`)) {
+          askConfirm(`차트 시트를 ${CHART_SHEET_PRICE.toLocaleString()}에 구매하시겠습니까? (뱅크롤에서 차감, 영구 소유)`, () => {
             setMeta(m => ({ ...m, bankroll: m.bankroll - CHART_SHEET_PRICE, ownsChartSheet: true }));
-          }
+          });
         };
 
         return (
@@ -2032,38 +2089,40 @@
                 </button>
               </div>
 
-              {/* 💡 수정: 시작 자금 자유 입력 -> 바이인 프리셋 선택 (뱅크롤로 필터링) */}
+              {/* 💡 수정: 바이인 프리셋을 한 줄로 늘어놓는 대신 좌우 화살표로 넘기는 캐러셀로 변경 */}
               <div style={styles.setupItemWrap}>
                 <div style={styles.setupItemTitle}>바이인 (뱅크롤에서 차감)</div>
-                <div style={styles.buyInPresetRow}>
-                  {showAllInOption ? (
+                {showAllInOption ? (
+                  <div style={styles.buyInCarouselRow}>
                     <button
                       style={{ ...styles.buyInPresetBtn, ...styles.buyInPresetBtnActive }}
                       onClick={() => selectBuyIn(meta.bankroll)}
                     >
                       전액 {meta.bankroll.toLocaleString()}
                     </button>
-                  ) : (
-                    BUYIN_PRESETS.map(preset => {
-                      const affordable = preset <= meta.bankroll;
-                      const selected = game.startingChips === preset;
-                      return (
-                        <button
-                          key={preset}
-                          disabled={!affordable}
-                          style={{
-                            ...styles.buyInPresetBtn,
-                            ...(selected ? styles.buyInPresetBtnActive : {}),
-                            ...(!affordable ? styles.buyInPresetBtnDisabled : {}),
-                          }}
-                          onClick={() => selectBuyIn(preset)}
-                        >
-                          {preset.toLocaleString()}
-                        </button>
-                      );
-                    })
-                  )}
-                </div>
+                  </div>
+                ) : (
+                  <div style={styles.buyInCarouselRow}>
+                    <button style={styles.aiStepBtn} disabled={presetIdx <= 0} onClick={() => cycleBuyIn(-1)}>‹</button>
+                    <div style={styles.buyInCarouselCenter}>
+                      <div style={{ ...styles.setupValueDisplay, ...(isBuyInUnlocked ? {} : styles.buyInLockedValue) }}>
+                        {currentPreset.toLocaleString()}
+                      </div>
+                      {!isBuyInUnlocked ? (
+                        <div style={styles.buyInSubNote}>🔒 뱅크롤 {currentThreshold.toLocaleString()} 이상 필요</div>
+                      ) : effectiveBuyIn < currentPreset ? (
+                        <div style={styles.buyInSubNote}>보유 뱅크롤이 부족해 실제로는 {effectiveBuyIn.toLocaleString()}으로 시작</div>
+                      ) : null}
+                    </div>
+                    <button
+                      style={styles.aiStepBtn}
+                      disabled={presetIdx >= BUYIN_PRESETS.length - 1}
+                      onClick={() => cycleBuyIn(1)}
+                    >
+                      ›
+                    </button>
+                  </div>
+                )}
               </div>
 
               {/* 💡 2. 앤티 설정 박스 (바이인의 10% 이내에서 슬라이더처럼 조정) */}
@@ -2098,8 +2157,15 @@
                 )}
               </div>
 
-              <button style={{ ...styles.primaryBtn, marginTop: 12 }} onClick={beginSetupGame}>게임 시작</button>
+              <button
+                style={{ ...styles.primaryBtn, marginTop: 12, ...((!showAllInOption && !isBuyInUnlocked) ? styles.buyInPresetBtnDisabled : {}) }}
+                disabled={!showAllInOption && !isBuyInUnlocked}
+                onClick={beginSetupGame}
+              >
+                게임 시작
+              </button>
             </div>
+            {modalOverlay}
           </div>
         );
       }
@@ -2127,7 +2193,7 @@
                 ) : (
                   <button
                     style={{ ...styles.resetBtn, ...styles.buyInPresetBtnDisabled }}
-                    onClick={() => alert(`차트 시트는 아직 구매하지 않았어요. 다음 퇴장 후 바이인 화면에서 ${CHART_SHEET_PRICE.toLocaleString()}에 구매할 수 있어요.`)}
+                    onClick={() => showAlert(`차트 시트는 아직 구매하지 않았어요. 다음 퇴장 후 바이인 화면에서 ${CHART_SHEET_PRICE.toLocaleString()}에 구매할 수 있어요.`)}
                   >
                     🧮 차트 시트 (미구매)
                   </button>
@@ -2138,8 +2204,17 @@
                 >
                   {showStats ? "📊 내 통계 숨기기" : "📊 내 통계 보기"}
                 </button>
-                <button style={styles.resetBtn} onClick={() => setIsMuted(!isMuted)}>
-                  {isMuted ? "🔇 사운드 끄기" : "🔊 사운드 켜기"}
+                <button
+                  style={{ ...styles.resetBtn, ...(isMutedBgm ? {} : styles.resetBtnActive) }}
+                  onClick={() => setIsMutedBgm(!isMutedBgm)}
+                >
+                  {isMutedBgm ? "🔇 배경음악 켜기" : "🎵 배경음악 끄기"}
+                </button>
+                <button
+                  style={{ ...styles.resetBtn, ...(isMutedSfx ? {} : styles.resetBtnActive) }}
+                  onClick={() => setIsMutedSfx(!isMutedSfx)}
+                >
+                  {isMutedSfx ? "🔇 효과음 켜기" : "🔊 효과음 끄기"}
                 </button>
                 <button style={styles.resetBtn} onClick={handleLeaveTable}>퇴장</button>
               </div>
@@ -2452,6 +2527,7 @@
               </aside>
             </div>
           </div>
+          {modalOverlay}
         </div>
       );
     }
@@ -2467,23 +2543,50 @@
       const isWinner = winAmount > 0 && (game.phase === "showdown" || game.phase === "foldwin");
 
       return (
-        <div style={{
-          ...styles.aiSeat,
-          opacity: eliminated ? 0.35 : folded ? 0.55 : 1,
-          ...(isCurrent ? styles.activeActor : {}),
-          ...(isWinner ? styles.winnerGlow : {}), // 황금빛 테두리 효과
-          position: "relative" // 배지 위치를 잡기 위해 추가
-        }}>
-          {/* 💡 AI 승리 배지 (박스 하단 중앙) */}
-          {isWinner && (
-            <div style={{ ...styles.winBadge, bottom: -14, left: "50%", transform: "translateX(-50%)" }}>
-              +{winAmount.toLocaleString()}
-            </div>
-          )}
+        <div style={{ position: "relative" }}>
+          <div style={{
+            ...styles.aiSeat,
+            opacity: eliminated ? 0.35 : folded ? 0.55 : 1,
+            ...(isCurrent ? styles.activeActor : {}),
+            ...(isWinner ? styles.winnerGlow : {}), // 황금빛 테두리 효과
+            position: "relative" // 배지 위치를 잡기 위해 추가
+          }}>
+            {/* 💡 AI 승리 배지 (박스 하단 중앙) */}
+            {isWinner && (
+              <div style={{ ...styles.winBadge, bottom: -14, left: "50%", transform: "translateX(-50%)" }}>
+                +{winAmount.toLocaleString()}
+              </div>
+            )}
 
-          {/* 💡 추가: 파산한 좌석 위에 뜨는 '새 AI 참가' 버튼 - 핸드 진행 중(플랍/턴/리버)엔 숨겨서
-              게임 로직과의 충돌(레이스 컨디션)을 피한다. 번호는 이 좌석이 쓰던 번호를 이어받지 않고
-              handleAiRejoin이 매번 새로 발급하는 다음 번호를 사용한다. */}
+            <div style={styles.seatName}>{game.names[id]}</div>
+            <div style={styles.seatChips}>칩 {(game.chips[id] || 0).toLocaleString()}</div>
+            <div style={styles.aiCards}>
+              {hole ? hole.map((c, i) => (
+                <CardView key={i} card={showCards ? c : undefined} back={!showCards} small />
+              )) : eliminated ? (
+                <>
+                  <CardView placeholder small />
+                  <CardView placeholder small />
+                </>
+              ) : (
+                <>
+                  <CardView back small />
+                  <CardView back small />
+                </>
+              )}
+            </div>
+            {folded && !isWinner && <div style={styles.badBadge}>폴드</div>}
+            {eliminated && <div style={styles.badBadge}>탈락</div>}
+            {!folded && !eliminated && !isWinner && game.lastAction[id] && (
+              <div style={styles.actionBadge}>{game.lastAction[id]}</div>
+            )}
+          </div>
+
+          {/* 💡 수정: '새 AI 참가' 버튼을 좌석 박스(opacity 0.35 적용됨) 바깥의 별도 wrapper로 옮김.
+              CSS opacity는 자식 요소에도 그대로 곱해져서 상속되기 때문에, 안쪽에 두면 버튼 자체 스타일과
+              무관하게 흐리게 보일 수밖에 없었다. 핸드 진행 중(플랍/턴/리버)엔 숨겨서 게임 로직과의
+              충돌(레이스 컨디션)을 피한다. 번호는 이 좌석이 쓰던 번호를 이어받지 않고 handleAiRejoin이
+              매번 새로 발급하는 다음 번호를 사용한다. */}
           {eliminated && canRejoin && (
             <button
               style={styles.aiRejoinBtn}
@@ -2491,29 +2594,6 @@
             >
               ➕ 새 AI 참가
             </button>
-          )}
-
-          <div style={styles.seatName}>{game.names[id]}</div>
-          <div style={styles.seatChips}>칩 {(game.chips[id] || 0).toLocaleString()}</div>
-          <div style={styles.aiCards}>
-            {hole ? hole.map((c, i) => (
-              <CardView key={i} card={showCards ? c : undefined} back={!showCards} small />
-            )) : eliminated ? (
-              <>
-                <CardView placeholder small />
-                <CardView placeholder small />
-              </>
-            ) : (
-              <>
-                <CardView back small />
-                <CardView back small />
-              </>
-            )}
-          </div>
-          {folded && !isWinner && <div style={styles.badBadge}>폴드</div>}
-          {eliminated && <div style={styles.badBadge}>탈락</div>}
-          {!folded && !eliminated && !isWinner && game.lastAction[id] && (
-            <div style={styles.actionBadge}>{game.lastAction[id]}</div>
           )}
         </div>
       );
@@ -2618,6 +2698,27 @@
         width: 100, textAlign: "center", margin: "0 8px"
       },
       // 💡 추가: 바이인 시스템 관련 스타일
+      // 💡 추가: window.confirm/alert 대체용 사이트 내 모달 스타일
+      modalOverlay: {
+        position: "fixed", inset: 0, background: "rgba(0,0,0,0.65)",
+        display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000,
+      },
+      modalBox: {
+        background: "#141812", border: "1px solid rgba(201,164,76,0.5)", borderRadius: 16,
+        padding: "24px 28px", maxWidth: 380, width: "88%", boxShadow: "0 12px 40px rgba(0,0,0,0.6)",
+      },
+      modalMessage: { fontSize: 15, color: "#F4EDD8", lineHeight: 1.6, marginBottom: 20, whiteSpace: "pre-line" },
+      modalButtons: { display: "flex", gap: 10, justifyContent: "flex-end" },
+      modalCancelBtn: {
+        padding: "8px 18px", borderRadius: 8, border: "1px solid rgba(255,255,255,0.2)",
+        background: "transparent", color: "#B7AF97", fontSize: 13, cursor: "pointer",
+        fontFamily: "'Courier New', monospace",
+      },
+      modalConfirmBtn: {
+        padding: "8px 18px", borderRadius: 8, border: "1px solid #C9A44C",
+        background: "rgba(201,164,76,0.25)", color: "#F4EDD8", fontSize: 13, fontWeight: 700,
+        cursor: "pointer", fontFamily: "'Courier New', monospace",
+      },
       bankrollBadge: {
         display: "inline-block", background: "rgba(201,164,76,0.12)", border: "1px solid rgba(201,164,76,0.4)",
         borderRadius: 20, padding: "6px 16px", fontSize: 15, color: "#C9A44C", fontWeight: 700,
@@ -2635,6 +2736,11 @@
       buyInPresetBtnDisabled: {
         opacity: 0.35, cursor: "not-allowed",
       },
+      // 💡 추가: 좌우 화살표 캐러셀 방식 바이인 선택 스타일
+      buyInCarouselRow: { display: "flex", alignItems: "center", justifyContent: "center", gap: 16 },
+      buyInCarouselCenter: { display: "flex", flexDirection: "column", alignItems: "center", gap: 4, minWidth: 140 },
+      buyInLockedValue: { color: "#6b6b6b" },
+      buyInSubNote: { fontSize: 11, color: "#8FAE9C", fontFamily: "'Courier New', monospace", textAlign: "center" },
       chartSheetOwned: { fontSize: 13, color: "#8FAE9C", lineHeight: 1.6, textAlign: "center" },
       // 💡 승리 시 박스가 황금색으로 빛나고 살짝 커지는 효과
       winnerGlow: {
@@ -2757,10 +2863,10 @@
       // 💡 추가: 파산한 좌석 위에 겹쳐서 뜨는 '새 AI 참가' 버튼
       aiRejoinBtn: {
         position: "absolute", top: "50%", left: "50%", transform: "translate(-50%, -50%)",
-        zIndex: 5, padding: "8px 14px", borderRadius: 10, border: "1px solid #C9A44C",
-        background: "rgba(20,24,20,0.92)", color: "#C9A44C", fontSize: 12, fontWeight: 700,
+        zIndex: 5, padding: "9px 16px", borderRadius: 10, border: "2px solid #C9A44C",
+        background: "#1a1f18", color: "#EFD9A0", fontSize: 12, fontWeight: 700,
         cursor: "pointer", fontFamily: "'Courier New', monospace", whiteSpace: "nowrap",
-        boxShadow: "0 0 10px rgba(201,164,76,0.4)",
+        boxShadow: "0 0 14px rgba(201,164,76,0.6)",
       },
       cardBase: {
         borderRadius: 8, display: "flex", flexDirection: "column", alignItems: "center",
