@@ -73,16 +73,14 @@
     const META_STORAGE_KEY = "noPreflopHoldem_meta_v1";
     const DEFAULT_BANKROLL = 100000;
     const BUYIN_PRESETS = [10000, 50000, 100000, 500000, 1000000];
-    // 💡 수정: 프리셋별로 필요한 최소 뱅크롤(잠금 해제 기준)을 개별 지정.
-    // 1만은 프리셋 금액 자체가 기준(항상 그만큼은 있어야 함). 나머지도 전부 프리셋 금액 이상으로 맞춰서
-    // '잠금은 풀렸는데 실제로는 다 못 채우는' 경우가 원천적으로 안 생기게 했다.
-    // (그래도 혹시 모를 상황을 대비해 beginSetupGame의 실제 차감액은 min(프리셋, 뱅크롤)로 한 번 더 캡을 씌워둔다)
+    // 💡 수정: 배수(뱅크롤/바이인)가 1.0 → 1.2 → 1.5 → 1.6 → 2.0으로 매끄럽게 커지도록 재설계.
+    // 1만/5만은 시작 뱅크롤(10만)로 처음부터 둘 다 열려있고, 위로 갈수록 "연승이 필요한" 느낌이 강해진다.
     const BUYIN_THRESHOLDS = {
-      10000: 10000,
-      50000: 100000,
-      100000: 150000,
-      500000: 600000,
-      1000000: 1200000,
+      10000: 10000,     // 1만 방: 언제든 입장 가능 (기본)
+      50000: 60000,     // 5만 방: 1.2배수 (초기 자금 10만이면 시작부터 열려있음!)
+      100000: 150000,   // 10만 방: 1.5배수 (5만 방에서 한 번만 크게 이기면 바로 해금)
+      500000: 800000,   // 50만 방: 1.6배수 (여기서부터 슬슬 연승이 필요함)
+      1000000: 2000000, // 100만 방: 2배수 (최종 보스 방. 진정한 고수만 도달 가능)
     };
     const CHART_SHEET_PRICE = 20000;
 
@@ -679,6 +677,34 @@
       const safePot = streetStartPot || 0; // 💡 방어 코드: 값이 없으면 0으로 계산하여 NaN 에러 방지
       const twentyFivePercent = Math.ceil((safePot * 0.25) / 100) * 100;
       return Math.max(ante * 2, twentyFivePercent);
+    }
+
+    // 💡 추가: 추천 앤티 = 바이인의 1% (100단위 반올림), 최소 100 ~ 최대(바이인의 10%) 사이로 클램프.
+    // 바이인의 1%로 잡으면 앤티를 걷은 직후 SPR이 대략 15~20 정도(6인 기준) 나와서 '깊음(SPR≥10)' 구간
+    // 초입이 된다. 앤티가 너무 크면 핸드가 바로 올인 각으로 몰려서 포스트플랍 판단을 연습할 틈이 없어지므로,
+    // 이 트레이너의 핵심 목적(포스트플랍 오즈 계산/드로우 판단)에 맞춰 일부러 이 정도로 낮게 잡았다.
+    function calcRecommendedAnte(buyIn) {
+      const maxAnte = Math.max(100, Math.floor((buyIn * 0.1) / 100) * 100);
+      const raw = Math.round((buyIn / 100) / 100) * 100;
+      return Math.max(100, Math.min(maxAnte, raw));
+    }
+
+    // 💡 추가: 주어진 칩 수량에 '비율(배수)'로 가장 가까운 바이인 프리셋을 찾는다.
+    // 프리셋 간격이 1만→5만→10만→50만→100만처럼 등비적으로 벌어져 있으므로, 단순 차이(뺄셈)가 아니라
+    // 로그 스케일 거리(비율)로 재야 직관과 맞는다 - 예: 25만은 차이로는 10만에 더 가깝지만(15만 vs 25만
+    // 차이), 배수로는 50만에 더 가깝다(2배 vs 2.5배). 새로 참가하는 AI의 시작 칩을 여기에 맞춘다.
+    function findClosestPresetByRatio(amount) {
+      if (!amount || amount <= 0) return BUYIN_PRESETS[0];
+      let best = BUYIN_PRESETS[0];
+      let bestDist = Infinity;
+      BUYIN_PRESETS.forEach(preset => {
+        const dist = Math.abs(Math.log(preset / amount));
+        if (dist < bestDist) {
+          bestDist = dist;
+          best = preset;
+        }
+      });
+      return best;
     }
 
     // 💡 추가: 배럴링(멀티스트리트 서사) 분석.
@@ -1389,8 +1415,7 @@
             const safeBuyIn = stillAffordable
               ? g.startingChips
               : (affordablePresets.length > 0 ? affordablePresets[affordablePresets.length - 1] : Math.max(0, newBankroll));
-            const newMaxAnte = Math.max(100, Math.floor((safeBuyIn * 0.1) / 100) * 100);
-            return { ...initialGame(), aiCount: g.aiCount, ante: Math.min(g.ante, newMaxAnte), startingChips: safeBuyIn };
+            return { ...initialGame(), aiCount: g.aiCount, ante: calcRecommendedAnte(safeBuyIn), startingChips: safeBuyIn };
           });
           setBetAmount(initialGame().ante * 5);
           runningRef.current = false;
@@ -1423,17 +1448,21 @@
           const rand = Math.random();
           const newPersonality = rand < 0.1 ? "Maniac" : rand < 0.2 ? "Station" : rand < 0.6 ? "TAG" : "Rock";
           const newName = `AI ${newNum}`;
+          // 💡 수정: 테이블의 원래 바이인으로 고정하는 대신, 유저의 현재 칩과 배수로 가장 가까운
+          // 프리셋으로 새 AI의 시작 칩을 정한다. 게임이 오래 진행되어 유저 스택이 커졌는데 새 AI가
+          // 계속 원래 바이인만큼(항상 숏스택)으로 들어오는 어색함을 피하기 위함.
+          const newChips = findClosestPresetByRatio(g.chips.user || 0);
           const next = {
             ...g,
             names: { ...g.names, [seatId]: newName },
-            chips: { ...g.chips, [seatId]: g.startingChips },
+            chips: { ...g.chips, [seatId]: newChips },
             eliminated: { ...g.eliminated, [seatId]: false },
             allIn: { ...g.allIn, [seatId]: false },
             folded: { ...g.folded, [seatId]: false },
             aiPersonalities: { ...g.aiPersonalities, [seatId]: newPersonality },
             nextAiNumber: newNum + 1,
           };
-          next.log = [...next.log, `💺 ${newName}이(가) 새로 참가했습니다 (칩 ${g.startingChips.toLocaleString()})`];
+          next.log = [...next.log, `💺 ${newName}이(가) 새로 참가했습니다 (칩 ${newChips.toLocaleString()})`];
           return next;
         });
       };
@@ -2027,14 +2056,13 @@
 
         // 💡 수정: 앤티는 '바이인의 10%'가 상한이며, 아주 적은 바이인에서도 최소 100은 보장한다.
         const maxAnte = Math.max(100, Math.floor((game.startingChips * 0.1) / 100) * 100);
+        // 💡 추가: 현재 선택된 바이인 기준 추천 앤티
+        const recommendedAnte = calcRecommendedAnte(game.startingChips);
         // 💡 수정: 뱅크롤이 가장 낮은 프리셋(1만)보다도 적을 때만 '전액' 특수 옵션을 보여준다.
         const showAllInOption = meta.bankroll < BUYIN_PRESETS[0];
 
         const selectBuyIn = amount => {
-          setGame(g => {
-            const newMaxAnte = Math.max(100, Math.floor((amount * 0.1) / 100) * 100);
-            return { ...g, startingChips: amount, ante: Math.min(g.ante, newMaxAnte) };
-          });
+          setGame(g => ({ ...g, startingChips: amount, ante: calcRecommendedAnte(amount) }));
         };
 
         // 💡 추가: 좌우 화살표로 넘기는 캐러셀 - 현재 game.startingChips가 가리키는 프리셋 인덱스를 찾는다.
@@ -2138,6 +2166,16 @@
                   <button style={styles.setupStepBtn} onClick={() => setGame(g => ({ ...g, ante: Math.min(maxAnte, g.ante + 100) }))}>+100</button>
                   <button style={styles.setupStepBtn} onClick={() => setGame(g => ({ ...g, ante: Math.min(maxAnte, g.ante + 1000) }))}>+1k</button>
                   <button style={styles.setupStepBtn} onClick={() => setGame(g => ({ ...g, ante: maxAnte }))}>Max</button>
+                </div>
+                {/* 💡 수정: 클릭해서 적용하는 링크 대신, 그냥 알려주기만 하는 문구로 단순화.
+                    title 속성으로 마우스를 올리면 이유(왜 바이인의 1%인지)가 뜬다. */}
+                <div style={styles.buyInSubNote}>
+                  <span
+                    style={{ cursor: "help", borderBottom: "1px dotted #8FAE9C" }}
+                    title="바이인의 1% 정도면 앤티를 걷은 직후 SPR이 15~20 정도가 되어, 핸드가 곧바로 올인 각으로 몰리지 않고 포스트플랍 판단(팟오즈/드로우 계산)을 연습할 여지가 남습니다."
+                  >
+                    앤티 추천값: {recommendedAnte.toLocaleString()}
+                  </span>
                 </div>
               </div>
 
