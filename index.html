@@ -393,7 +393,19 @@
       return { spr, tier, label };
     }
 
-    function getRelativeStrength(ev, hole, community, toCall, pot, spr, positionLabel) {
+    // 💡 추가: 테이블 사이즈(게임 전체 생존자 수) 계산.
+    // opponentsCount(이번 핸드에 살아있는 상대 수)와는 다른 축 - 게임 전체에서 몇 명이 파산했는지에 따라
+    // 숏핸디드/헤즈업으로 갈수록 핸드 가치 기준 자체가 낮아진다(실전 포커 이론과 동일).
+    function calculateTableDynamics(remainingPlayers) {
+      if (!remainingPlayers || remainingPlayers <= 0) return { tier: "full", label: "", remainingPlayers: remainingPlayers || 0 };
+      let tier, label;
+      if (remainingPlayers <= 2) { tier = "headsup"; label = `생존자 ${remainingPlayers}명(헤즈업)`; }
+      else if (remainingPlayers <= 4) { tier = "short"; label = `생존자 ${remainingPlayers}명(숏핸디드)`; }
+      else { tier = "full"; label = `생존자 ${remainingPlayers}명(풀링)`; }
+      return { tier, label, remainingPlayers };
+    }
+
+    function getRelativeStrength(ev, hole, community, toCall, pot, spr, positionLabel, remainingPlayers, positionTier) {
       if (!community || community.length === 0) {
         return {
           isStrong: ev.cat >= 2,
@@ -557,31 +569,45 @@
         }
       }
 
-      // 4. 💡 추가: SPR(스택 대 팟 비율) 기반 커밋 성향 조정
-      // SPR = 유효 스택(나와 상대 중 더 짧은 쪽) ÷ 팟. 낮을수록 이미 '커밋 구간'이라 웬만한 메이드핸드로도
-      // 올인까지 가는 게 표준 플레이고, 높을수록(스택이 깊을수록) 원페어~투페어급으로 풀커밋하기엔 위험이 큼.
+      // 4. 💡 수정: SPR(스택 대 팟 비율) 기반 커밋 성향 조정.
+      // 💡 코멘트 밀도 완화: SPR이 '중간'이면 판정에 영향이 없으므로 아예 언급하지 않고,
+      // 낮음/깊음일 때만 라벨+설명을 한 문구로 압축해서(따로 문장을 안 늘리고) 표시한다.
       if (typeof spr === "number" && isFinite(spr)) {
-        const sprLabel = spr <= 4 ? "낮음, 커밋 구간" : spr <= 10 ? "중간" : "깊음";
-        reasons.push(`SPR ${spr.toFixed(1)}(${sprLabel})`);
-
-        if (spr <= 4 && isModerate && ev.cat >= 1) {
-          isModerate = false;
-          isStrong = true;
-          reasons.push(`SPR이 낮아 이 정도 핸드로도 사실상 올인까지 갈 만한 커밋 구간`);
-        } else if (spr >= 10 && isStrong && ev.cat <= 2) {
-          isStrong = false;
-          isModerate = true;
-          reasons.push(`SPR이 깊어 이 정도 핸드로 풀커밋하기엔 위험 부담이 큼`);
+        if (spr <= 4) {
+          const upgraded = isModerate && ev.cat >= 1;
+          if (upgraded) { isModerate = false; isStrong = true; }
+          reasons.push(`SPR ${spr.toFixed(1)}(낮음, 커밋 구간${upgraded ? "으로 승격" : ""})`);
+        } else if (spr >= 10) {
+          const downgraded = isStrong && ev.cat <= 2;
+          if (downgraded) { isStrong = false; isModerate = true; }
+          reasons.push(`SPR ${spr.toFixed(1)}(깊음${downgraded ? ", 풀커밋 위험으로 강등" : ""})`);
         }
+        // SPR 4~10(중간)은 특별한 조정이 없으므로 코멘트 밀도를 위해 언급하지 않음
       }
 
-      // 5. 💡 추가: 블로커 노트 (있을 때만 표시 - 없으면 굳이 "블로커 없음"으로 코멘트를 채우지 않음)
+      // 5. 💡 수정: 테이블 사이즈(게임 전체 생존자 수) 기반 핸드가치 기준 완화.
+      // 마찬가지로 '풀링(평범)'이면 언급하지 않고, 숏핸디드/헤즈업일 때만 압축된 한 문구로 표시.
+      const tableDynamics = calculateTableDynamics(remainingPlayers);
+      if (tableDynamics.tier === "headsup") {
+        let tag = "";
+        if (isWeak && ev.cat >= 1) { isWeak = false; isModerate = true; tag = ", 페어면 밸류로 승격"; }
+        else if (isModerate) { isModerate = false; isStrong = true; tag = ", 강패로 승격"; }
+        reasons.push(`${tableDynamics.label}${tag}`);
+      } else if (tableDynamics.tier === "short") {
+        let tag = "";
+        if (isModerate && ev.cat >= 2) { isModerate = false; isStrong = true; tag = ", 강패로 승격"; }
+        reasons.push(`${tableDynamics.label}${tag}`);
+      }
+      // 풀링(평범)은 코멘트 밀도를 위해 언급하지 않음
+
+      // 6. 💡 추가: 블로커 노트 (있을 때만 표시 - 없으면 굳이 "블로커 없음"으로 코멘트를 채우지 않음)
       if (blockers.blockerNote) {
         reasons.push(blockers.blockerNote);
       }
 
-      // 6. 💡 추가: 포지션 노트 (항상 표시 - 이번 스트리트에서의 정보 우위/열위를 투명하게 알림)
-      if (positionLabel) {
+      // 7. 💡 수정: 포지션 노트 - 미들 포지션(평범)은 코멘트 밀도를 위해 언급하지 않고,
+      // 얼리/레이트처럼 실제로 의미 있는 경우만 표시.
+      if (positionLabel && positionTier !== "middle") {
         reasons.push(positionLabel);
       }
 
@@ -646,11 +672,11 @@
       const phaseNames = { flop: "플랍", turn: "턴", river: "리버" };
 
       actions.forEach((act, idx) => {
-        const { phase, type, investedAmount, isAllIn, ev, drawInfo, pot, toCall, opponentsCount, hole, community, spr, positionTier, positionLabel } = act;
+        const { phase, type, investedAmount, isAllIn, ev, drawInfo, pot, toCall, opponentsCount, hole, community, spr, positionTier, positionLabel, remainingPlayers } = act;
         let score = 70;
         let comment = "판단 보류 (정보 부족)";
 
-        const { isStrong, isModerate, isWeak, isBoardHeavy, contextText, hasKeyBlocker } = getRelativeStrength(ev, hole, community, toCall, pot, spr, positionLabel);
+        const { isStrong, isModerate, isWeak, isBoardHeavy, contextText, hasKeyBlocker } = getRelativeStrength(ev, hole, community, toCall, pot, spr, positionLabel, remainingPlayers, positionTier);
 
         const potOdds = toCall > 0 ? toCall / (pot + toCall) : 0;
         const betRatio = investedAmount / (pot || 1);
@@ -956,8 +982,8 @@
     }
 
 
-    function decideAI(ev, toCall, chips, pot, aiType, drawInfo, hole, community, currentAnte, streetStartPot, opponentsCount, opponentProfile, spr, positionTier, positionLabel) {
-      const { isStrong, isModerate, isWeak, hasKeyBlocker } = getRelativeStrength(ev, hole, community, toCall, pot, spr, positionLabel);
+    function decideAI(ev, toCall, chips, pot, aiType, drawInfo, hole, community, currentAnte, streetStartPot, opponentsCount, opponentProfile, spr, positionTier, positionLabel, remainingPlayers) {
+      const { isStrong, isModerate, isWeak, hasKeyBlocker } = getRelativeStrength(ev, hole, community, toCall, pot, spr, positionLabel, remainingPlayers, positionTier);
       const isRiver = community.length === 5;
       const potOdds = toCall > 0 ? toCall / (pot + toCall) : 0;
       const calculateBet = () => {
@@ -991,10 +1017,25 @@
       const blockerBoost = hasKeyBlocker ? 1.6 : 1;
       // 💡 추가: 레이트 포지션(늦게 액션 = 남들 반응을 이미 봄)일수록 블러핑/씬밸류 빈도를 높임
       const positionBoost = positionTier === "late" ? 1.4 : positionTier === "early" ? 0.8 : 1;
+      // 💡 추가: 게임 전체 생존자 수(테이블 사이즈)가 적을수록(헤즈업/숏핸디드) 더 루즈하게 플레이
+      const tableDynamicsForAI = calculateTableDynamics(remainingPlayers);
+      const tableSizeBoost = tableDynamicsForAI.tier === "headsup" ? 1.6 : tableDynamicsForAI.tier === "short" ? 1.2 : 1;
 
       // 💡 새로 추가: 유저가 벳에 잘 접으면(foldToBetRate↑) 블러핑을 늘리고, 잘 안 접으면(콜링 스테이션 성향) 블러핑을 줄임.
       // 표본 부족(opponentProfile === null)이면 중립값 1 유지.
       const exploitMultiplier = opponentProfile ? (0.6 + opponentProfile.foldToBetRate) : 1;
+
+      // 💡 버그 수정: multiwayPenalty/exploitMultiplier/blockerBoost/positionBoost/tableSizeBoost를 전부
+      // 곱하면(각각 최대 1.6배 안팎) 유리한 조건이 여러 개 겹치는 순간 3~6배까지 복합되어 블러핑 확률이
+      // 100%로 포화돼버리는 문제가 있었다(예: 헤즈업+레이트포지션+블로커 = 3.58배, TAG 20%→72%,
+      // Maniac 60%→100%). 개별 배수는 각각 타당하지만 곱셈이 무제한으로 누적되면 "가끔 과감해지는" 게
+      // 아니라 "그 상황만 되면 무조건"이 되어버려 예측 불가능성(밸런스)이 사라진다.
+      // 상한(MAX_BLUFF_PROB)을 둬서, 아무리 유리한 조건이 겹쳐도 블러핑이 100% 확정은 되지 않게 한다.
+      const MAX_BLUFF_PROB = 0.75;
+      const bluffProb = base => Math.min(
+        MAX_BLUFF_PROB,
+        base * multiwayPenalty * exploitMultiplier * blockerBoost * positionBoost * tableSizeBoost
+      );
 
       // 💡 추가: 유저의 공격성 지표 (보통 사람의 평균은 0.2 내외)
       const aggroFreq = opponentProfile ? opponentProfile.aggressionFreq : 0.2;
@@ -1042,7 +1083,7 @@
               if (potOdds < (0.30 + bluffCatchBonus)) return { type: "call" };
               return { type: "fold" };
             }
-            if (isWeak && toCall === 0 && Math.random() < 0.60 * multiwayPenalty * exploitMultiplier * blockerBoost * positionBoost) return { type: "bet", amount: calculateThinBet(0.5, 0.8) };
+            if (isWeak && toCall === 0 && Math.random() < bluffProb(0.60)) return { type: "bet", amount: calculateThinBet(0.5, 0.8) };
             if (isWeak && toCall > 0 && Math.random() < 0.20 * exploitMultiplier) return { type: "bet", amount: calculateThinBet(0.5, 0.8) }; 
             if (toCall > 0 && potOdds < 0.35) return { type: "call" }; 
             if (toCall > 0) return { type: "fold" };
@@ -1072,7 +1113,7 @@
               if (potOdds < (0.3 + bluffCatchBonus)) return { type: "call" }; 
               return { type: "fold" };
             }
-            if (toCall === 0 && Math.random() < 0.20 * multiwayPenalty * exploitMultiplier * blockerBoost * positionBoost) return { type: "bet", amount: calculateThinBet(0.4, 0.6) };
+            if (toCall === 0 && Math.random() < bluffProb(0.20)) return { type: "bet", amount: calculateThinBet(0.4, 0.6) };
             if (toCall > 0) return { type: "fold" };
             return { type: "check" };
         }
@@ -1089,7 +1130,7 @@
       switch (aiType) {
         case "Maniac":
           if (isStrong) return { type: "bet", amount: calculateBet() };
-          if (Math.random() < getNoisyThreshold(0.40, 0.15) * multiwayPenalty * exploitMultiplier * blockerBoost * positionBoost) return { type: "bet", amount: calculateThinBet(0.5, 0.8) };
+          if (Math.random() < bluffProb(getNoisyThreshold(0.40, 0.15))) return { type: "bet", amount: calculateThinBet(0.5, 0.8) };
           if (toCall > 0 && (isModerate || drawInfo.hitChance >= potOdds - 0.10)) return { type: "call" };
           if (toCall > 0) return { type: "fold" };
           return { type: "check" };
@@ -1121,7 +1162,7 @@
             if (toCall > 0 && potOdds < getNoisyThreshold(0.30 + bluffCatchBonus, 0.05)) return { type: "call" };
             return { type: "fold" };
           }
-          if (toCall === 0 && Math.random() < getNoisyThreshold(0.20, 0.05) * multiwayPenalty * exploitMultiplier * blockerBoost * positionBoost) return { type: "bet", amount: calculateThinBet(0.4, 0.6) };
+          if (toCall === 0 && Math.random() < bluffProb(getNoisyThreshold(0.20, 0.05))) return { type: "bet", amount: calculateThinBet(0.4, 0.6) };
           if (toCall > 0 && drawInfo.hitChance >= (potOdds - bluffCatchBonus)) return { type: "call" };
           if (toCall > 0) return { type: "fold" };
           return { type: "check" };
@@ -1372,6 +1413,8 @@
           const sprInfo = calculateSPR(effectiveStack, s.pot);
           // 💡 추가: 포지션 계산 - 이번 스트리트에서 나보다 늦게 액션하는 인원 수(queue에 남은 인원)
           const positionInfo = calculatePosition(queue.length, activePlayers.length);
+          // 💡 추가: 게임 전체 생존자 수(테이블 사이즈) - opponentsCount(이번 핸드 한정)와 다른 축
+          const remainingPlayersCount = players.filter(pl => !s.eliminated[pl]).length;
 
           // 💡 추가: 연습모드 패널이 정확한 실시간 포지션을 보여줄 수 있도록, 유저 본인 기준 포지션을 상태에 기록.
           // 레이즈로 큐가 재구성되는 경우까지 정확히 반영하려면 '고정 순서 근사치'가 아니라 실제 큐를 봐야 함.
@@ -1414,7 +1457,8 @@
               community: [...s.community],
               spr: sprInfo.spr,
               positionTier: positionInfo.tier,
-              positionLabel: positionInfo.label
+              positionLabel: positionInfo.label,
+              remainingPlayers: remainingPlayersCount
             });
 
             // 💡 추가: 유저의 전체 액션 횟수와 공격적 액션(베팅/레이즈) 카운트
@@ -1431,7 +1475,7 @@
             if (!gameStateRef.current.setupDone) return;
             // 💡 유저가 이번 핸드에 아직 살아있을 때만 '유저 프로필'을 반영 (이미 폴드했으면 반영할 대상이 없으므로 중립)
             const opponentProfile = (!s.folded.user && !s.eliminated.user) ? getOpponentProfile(s) : null;
-            action = decideAI(ev, toCall, s.chips[p], s.pot, s.aiPersonalities[p], drawInfo, s.hole[p], s.community, s.ante, s.streetStartPot, activeOpponentsCount, opponentProfile, sprInfo.spr, positionInfo.tier, positionInfo.label);
+            action = decideAI(ev, toCall, s.chips[p], s.pot, s.aiPersonalities[p], drawInfo, s.hole[p], s.community, s.ante, s.streetStartPot, activeOpponentsCount, opponentProfile, sprInfo.spr, positionInfo.tier, positionInfo.label, remainingPlayersCount);
             if (action.type === "bet" && s.chips[p] <= toCall) action = { type: "call" };
           }
 
@@ -1798,6 +1842,9 @@
       // 💡 수정: 근사치 대신, 게임 로직이 실제 큐(레이즈로 인한 재구성까지 반영)를 보고 직접 계산해
       // 상태에 저장해둔 정확한 값을 그대로 사용한다.
       const practicePositionInfo = game.livePositionForUser || calculatePosition(0, 1);
+      // 💡 추가: 연습모드용 테이블 사이즈(게임 전체 생존자 수) 정보
+      const practiceRemainingPlayers = (game.players || []).filter(pl => !(game.eliminated && game.eliminated[pl])).length;
+      const practiceTableDynamics = calculateTableDynamics(practiceRemainingPlayers);
 
       // 💡 추가: 여러 핸드 누적 통계(userStats)로부터 화면에 표시할 파생 지표 계산
       const us = game.userStats || createEmptyUserStats();
@@ -2130,6 +2177,12 @@
                             <span style={styles.practiceLabel}>포지션</span>
                             <span style={styles.practiceValue}>{practicePositionInfo.label}</span>
                           </div>
+                          {practiceTableDynamics.label && (
+                            <div style={styles.practiceRow}>
+                              <span style={styles.practiceLabel}>테이블</span>
+                              <span style={styles.practiceValue}>{practiceTableDynamics.label}</span>
+                            </div>
+                          )}
                         </div>
                       )}
 
@@ -2242,14 +2295,14 @@
           <div style={styles.seatName}>{game.names[id]}</div>
           <div style={styles.seatChips}>칩 {(game.chips[id] || 0).toLocaleString()}</div>
           <div style={styles.aiCards}>
-            {eliminated ? (
+            {hole ? hole.map((c, i) => (
+              <CardView key={i} card={showCards ? c : undefined} back={!showCards} small />
+            )) : eliminated ? (
               <>
                 <CardView placeholder small />
                 <CardView placeholder small />
               </>
-            ) : hole ? hole.map((c, i) => (
-              <CardView key={i} card={showCards ? c : undefined} back={!showCards} small />
-            )) : (
+            ) : (
               <>
                 <CardView back small />
                 <CardView back small />
