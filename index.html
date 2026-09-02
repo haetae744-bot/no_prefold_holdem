@@ -30,6 +30,14 @@
       background: rgba(201, 164, 76, 0.4);
       border-radius: 3px;
     }
+
+    @keyframes victoryPulse {
+      0%, 100% { transform: scale(1); filter: drop-shadow(0 0 6px rgba(201,164,76,0.5)); }
+      50% { transform: scale(1.1); filter: drop-shadow(0 0 22px rgba(201,164,76,0.9)); }
+    }
+    .victory-badge {
+      animation: victoryPulse 1.7s ease-in-out infinite;
+    }
   </style>
 </head>
 
@@ -323,7 +331,69 @@
       return { outs, hitChance, drawType };
     }
 
-    function getRelativeStrength(ev, hole, community, toCall, pot) {
+    // 💡 추가: SPR(Stack-to-Pot Ratio, 스택 대 팟 비율) 계산.
+    // effectiveStack = 이 팟에 아직 살아있는 플레이어들 중 가장 짧은 스택(그 이상은 실질적으로 못 걸림).
+    // 💡 추가: 블로커(카드 제거 효과) 계산.
+    // 내 홀카드가 상대의 특정 '너트급' 조합을 물리적으로 줄여주는지 확인한다.
+    // - 너트 플러시 블로커: 보드에 3장 이상 깔린 무늬의 A를 들고 있으면, 상대가 그 무늬 너트 플러시를 들 수 없음
+    // - 트리플/풀하우스 블로커: 보드가 페어링된 랭크를 들고 있으면, 상대가 그 랭크로 트리플/포카드를 만들 콤보가 줄어듦
+    function calculateBlockers(hole, community) {
+      if (!hole || hole.length === 0 || !community || community.length === 0) {
+        return { blocksNutFlush: false, blocksSecondNutFlush: false, blocksTrips: false, hasKeyBlocker: false, blockerNote: "" };
+      }
+
+      const suitCounts = { "♠": 0, "♥": 0, "♦": 0, "♣": 0 };
+      community.forEach(c => { suitCounts[c.suit]++; });
+      const flushSuit = Object.keys(suitCounts).find(s => suitCounts[s] >= 3);
+
+      let blocksNutFlush = false;
+      let blocksSecondNutFlush = false;
+      if (flushSuit) {
+        const holeSuited = hole.filter(c => c.suit === flushSuit);
+        blocksNutFlush = holeSuited.some(c => c.rank === 14);
+        blocksSecondNutFlush = !blocksNutFlush && holeSuited.some(c => c.rank === 13);
+      }
+
+      const communityRankCounts = {};
+      community.forEach(c => { communityRankCounts[c.rank] = (communityRankCounts[c.rank] || 0) + 1; });
+      const pairedRanks = Object.keys(communityRankCounts).map(Number).filter(r => communityRankCounts[r] >= 2);
+      const blocksTrips = pairedRanks.some(r => hole.some(c => c.rank === r));
+
+      const hasKeyBlocker = blocksNutFlush || blocksTrips;
+
+      const notes = [];
+      if (blocksNutFlush) notes.push("너트 플러시 블로커 보유");
+      else if (blocksSecondNutFlush) notes.push("세컨 너트 플러시 블로커 보유");
+      if (blocksTrips) notes.push("보드 페어 랭크를 들고 있어 상대 트리플/풀하우스 가능성 낮춤");
+
+      return { blocksNutFlush, blocksSecondNutFlush, blocksTrips, hasKeyBlocker, blockerNote: notes.join(", ") };
+    }
+
+    // 💡 추가: 포지션 계산. 이 게임엔 버튼/블라인드가 없지만, 한 핸드 안에서는 플랍/턴/리버 내내
+    // 액션 순서(s.players 배열 순서)가 고정되므로 '이번 스트리트에서 나보다 늦게 액션하는 인원 수'가
+    // 곧 실질적인 포지션(정보 우위)이 된다. 늦게 액션할수록(actorsRemainingAfterMe가 작을수록) 유리.
+    function calculatePosition(actorsRemainingAfterMe, totalActive) {
+      if (totalActive <= 1) return { tier: "late", label: "포지션 우위(마지막 액션)", actorsRemainingAfterMe };
+      if (actorsRemainingAfterMe === 0) return { tier: "late", label: "포지션 우위 (마지막 액션)", actorsRemainingAfterMe };
+      const ratio = actorsRemainingAfterMe / (totalActive - 1);
+      let tier, label;
+      if (ratio <= 0.34) { tier = "late"; label = "레이트 포지션"; }
+      else if (ratio <= 0.67) { tier = "middle"; label = "미들 포지션"; }
+      else { tier = "early"; label = "얼리 포지션"; }
+      return { tier, label, actorsRemainingAfterMe };
+    }
+
+    function calculateSPR(effectiveStack, pot) {
+      if (!pot || pot <= 0) return { spr: null, tier: "unknown", label: "계산 불가" };
+      const spr = effectiveStack / pot;
+      let tier, label;
+      if (spr <= 4) { tier = "low"; label = "낮음 (커밋 구간)"; }
+      else if (spr <= 10) { tier = "medium"; label = "중간"; }
+      else { tier = "high"; label = "깊음"; }
+      return { spr, tier, label };
+    }
+
+    function getRelativeStrength(ev, hole, community, toCall, pot, spr, positionLabel) {
       if (!community || community.length === 0) {
         return {
           isStrong: ev.cat >= 2,
@@ -337,6 +407,8 @@
       const boardEv = evaluateBest(community);
       const holeIds = hole.map(c => `${c.rank}${c.suit}`);
       const usedHoleCards = ev.cards.filter(c => holeIds.includes(`${c.rank}${c.suit}`));
+      // 💡 추가: 블로커 계산 (너트 플러시/트리플 등 상대의 강한 조합을 물리적으로 줄이는지)
+      const blockers = calculateBlockers(hole, community);
 
       let isStrong = false;
       let isModerate = false;
@@ -485,8 +557,36 @@
         }
       }
 
+      // 4. 💡 추가: SPR(스택 대 팟 비율) 기반 커밋 성향 조정
+      // SPR = 유효 스택(나와 상대 중 더 짧은 쪽) ÷ 팟. 낮을수록 이미 '커밋 구간'이라 웬만한 메이드핸드로도
+      // 올인까지 가는 게 표준 플레이고, 높을수록(스택이 깊을수록) 원페어~투페어급으로 풀커밋하기엔 위험이 큼.
+      if (typeof spr === "number" && isFinite(spr)) {
+        const sprLabel = spr <= 4 ? "낮음, 커밋 구간" : spr <= 10 ? "중간" : "깊음";
+        reasons.push(`SPR ${spr.toFixed(1)}(${sprLabel})`);
+
+        if (spr <= 4 && isModerate && ev.cat >= 1) {
+          isModerate = false;
+          isStrong = true;
+          reasons.push(`SPR이 낮아 이 정도 핸드로도 사실상 올인까지 갈 만한 커밋 구간`);
+        } else if (spr >= 10 && isStrong && ev.cat <= 2) {
+          isStrong = false;
+          isModerate = true;
+          reasons.push(`SPR이 깊어 이 정도 핸드로 풀커밋하기엔 위험 부담이 큼`);
+        }
+      }
+
+      // 5. 💡 추가: 블로커 노트 (있을 때만 표시 - 없으면 굳이 "블로커 없음"으로 코멘트를 채우지 않음)
+      if (blockers.blockerNote) {
+        reasons.push(blockers.blockerNote);
+      }
+
+      // 6. 💡 추가: 포지션 노트 (항상 표시 - 이번 스트리트에서의 정보 우위/열위를 투명하게 알림)
+      if (positionLabel) {
+        reasons.push(positionLabel);
+      }
+
       const reasonText = reasons.filter(Boolean).join(" · ");
-      return { isStrong, isModerate, isWeak, isBoardHeavy, reasonText };
+      return { isStrong, isModerate, isWeak, isBoardHeavy, reasonText, hasKeyBlocker: blockers.hasKeyBlocker };
     }
 
     //최소 오프닝 베팅 계산 (25% 룰 및 100단위 CEIL)
@@ -494,6 +594,27 @@
       const safePot = streetStartPot || 0; // 💡 방어 코드: 값이 없으면 0으로 계산하여 NaN 에러 방지
       const twentyFivePercent = Math.ceil((safePot * 0.25) / 100) * 100;
       return Math.max(ante * 2, twentyFivePercent);
+    }
+
+    // 💡 추가: 배럴링(멀티스트리트 서사) 분석.
+    // 직전 스트리트에 베팅했었다면, 그 베팅이 밸류/세미블러프/퓨어블러핑 중 무엇이었는지 판정하고
+    // 이번 스트리트에서 그 스토리를 잘 이어가고 있는지(또는 잘 포기했는지) 확인한다.
+    function analyzeBarrel(prevAct, curAct) {
+      if (!prevAct || prevAct.type !== "bet") return null;
+
+      const prevStrength = getRelativeStrength(prevAct.ev, prevAct.hole, prevAct.community, prevAct.toCall, prevAct.pot, prevAct.spr);
+      const prevOuts = prevAct.drawInfo ? prevAct.drawInfo.outs : 0;
+
+      let prevBetType;
+      if (prevStrength.isStrong) prevBetType = "value";
+      else if (prevOuts >= 4) prevBetType = "semiBluff";
+      else prevBetType = "pureBluff";
+
+      const improved = curAct.ev.cat > prevAct.ev.cat;
+      // 💡 추가: 직전 베팅에 상대가 어떻게 반응했는지(레이즈까지 당했는지, 콜만 받았는지)
+      const facedRaise = !!(prevAct.opponentResponse && prevAct.opponentResponse.gotRaised);
+      const gotCalled = !!(prevAct.opponentResponse && prevAct.opponentResponse.gotCalled);
+      return { prevBetType, improved, facedRaise, gotCalled };
     }
 
     function evaluateUserActions(actions, currentAnte) {
@@ -504,12 +625,12 @@
       const phaseResults = [];
       const phaseNames = { flop: "플랍", turn: "턴", river: "리버" };
 
-      actions.forEach(act => {
-        const { phase, type, investedAmount, ev, drawInfo, pot, toCall, opponentsCount, hole, community } = act;
+      actions.forEach((act, idx) => {
+        const { phase, type, investedAmount, isAllIn, ev, drawInfo, pot, toCall, opponentsCount, hole, community, spr, positionTier, positionLabel } = act;
         let score = 70;
         let comment = "판단 보류 (정보 부족)";
 
-        const { isStrong, isModerate, isWeak, isBoardHeavy, reasonText } = getRelativeStrength(ev, hole, community, toCall, pot);
+        const { isStrong, isModerate, isWeak, isBoardHeavy, reasonText, hasKeyBlocker } = getRelativeStrength(ev, hole, community, toCall, pot, spr, positionLabel);
 
         const potOdds = toCall > 0 ? toCall / (pot + toCall) : 0;
         const betRatio = investedAmount / (pot || 1);
@@ -604,28 +725,47 @@
           else if (type === "bet") {
             if (isStrong) {
               if (betRatio > 1.0) { score = 80; comment = "강력한 패지만 오버벳 기미가 있습니다. 콜 범위를 좁혀 상대가 도망갈 수 있습니다."; }
-              else if (betRatio < 0.6) { score = 75; comment = "유리한 상황이지만 베팅 사이즈가 작습니다. 상대에게 싼 값에 역전 기회(드로우)를 줄 수 있습니다."; }
+              else if (betRatio < 0.6) {
+                if (isAllIn) { score = 95; comment = "스택이 짧아 정석 사이즈(60~100%)에는 못 미쳤지만, 가진 칩을 전부 투입한 올바른 올인입니다."; }
+                else { score = 75; comment = "유리한 상황이지만 베팅 사이즈가 작습니다. 상대에게 싼 값에 역전 기회(드로우)를 줄 수 있습니다."; }
+              }
               else { score = 95; comment = "강한 패를 바탕으로 팟 규모(60~100%)에 딱 맞는 완벽한 밸류 베팅입니다."; }
             }
             else if (isModerate) {
               if (betRatio > 0.5) { score = 55; comment = "애매한 패로 너무 크게 베팅했습니다. 나보다 강한 패만 콜을 받을 위험이 큽니다."; }
               else if (betRatio >= 0.3) { score = 85; comment = "애매한 패(씬 밸류/블락벳)로 팟의 30~50%를 적절히 베팅하며 주도권을 잡았습니다."; }
-              else { score = 65; comment = "애매한 패로 주도권을 쥐려 했으나 사이즈가 너무 작아 효과가 미미합니다."; }
+              else {
+                if (isAllIn) { score = 85; comment = "스택이 짧아 정석 사이즈(30~50%)에는 못 미쳤지만, 가진 칩을 전부 투입한 합리적인 올인입니다."; }
+                else { score = 65; comment = "애매한 패로 주도권을 쥐려 했으나 사이즈가 너무 작아 효과가 미미합니다."; }
+              }
             }
             else {
               if (hasGoodDraw) {
                 if (betRatio >= 0.5 && betRatio <= 0.8) { score = 100; comment = `좋은 드로우를 바탕으로 팟의 50~80%를 때리는 아주 날카로운 세미-블러프입니다.`; }
+                else if (isAllIn && betRatio < 0.5) { score = 95; comment = `스택이 짧아 정석 사이즈(50~80%)에는 못 미쳤지만, ${drawType}을 살려 가진 칩을 전부 투입한 좋은 올인입니다.`; }
                 else { score = 90; comment = `${drawType}을 활용한 세미-블러프는 좋았으나, 베팅 사이즈가 정석 범위(50~80%)를 벗어났습니다.`; }
               }
               // 💡 [수정됨] 아웃츠 4~7개(빵꾸 등)를 '아웃츠 없는 퓨어 블러핑'에서 구출하여 세미 블러프로 고평가
               else if (outs >= 4) {
                 if (betRatio >= 0.4 && betRatio <= 0.8) { score = 95; comment = `${drawType} 가능성을 활용한 찌르기(세미 블러프)입니다. 공격적인 정석 플레이입니다.`; }
+                else if (isAllIn && betRatio < 0.4) { score = 90; comment = `스택이 짧아 정석 사이즈(40~80%)에는 못 미쳤지만, ${drawType} 가능성을 살려 가진 칩을 전부 투입한 판단입니다.`; }
                 else { score = 85; comment = `${drawType} 상태에서 베팅을 시도했으나, 상대방에게 압박을 주기엔 사이즈가 다소 아쉽습니다.`; }
+              }
+              // 💡 추가: 발전 가능성(아웃츠)은 없어도 상대의 너트급 조합을 블로킹하고 있다면 근거 있는 블러핑
+              else if (hasKeyBlocker) {
+                if (betRatio >= 0.5 && betRatio <= 0.8) { score = 90; comment = "아웃츠는 없지만 상대의 너트급 조합을 블로킹하고 있어 근거 있는 블러핑입니다."; }
+                else if (isAllIn && betRatio < 0.5) { score = 85; comment = "스택이 짧아 정석 사이즈에는 못 미쳤지만, 블로커를 활용한 근거 있는 올인 블러핑입니다."; }
+                else { score = 75; comment = "블로커를 활용한 블러핑 아이디어는 좋았으나, 사이즈가 정석 범위(50~80%)를 벗어났습니다."; }
+              }
+              // 💡 추가: 아웃츠도 블로커도 없어도, 다들 체크한 뒤 마지막에 베팅하는 레이트 포지션 스틸이면 근거 있는 시도로 인정
+              else if (opponentsCount >= 2 && positionTier === "late" && toCall === 0) {
+                score = 80; comment = "다들 체크한 뒤 마지막에 베팅하는 좋은 스틸 자리입니다. 아웃츠는 없지만 포지션 우위를 활용한 합리적 시도입니다.";
               }
               else if (opponentsCount >= 2) { score = 70; comment = "상대가 여럿 남은 상황에서 진짜 아웃츠가 하나도 없는 퓨어 블러핑은 위험도가 높습니다."; }
               else if (toCall > 0) { score = 75; comment = "상대방이 먼저 베팅으로 힘을 과시했는데 빈 패로 맞불(재레이즈)을 놓은 무리한 플레이입니다."; }
               else {
                 if (betRatio >= 0.5 && betRatio <= 0.8) { score = 95; comment = "1:1 상황에서 타이밍을 뺏는 과감하고 정교한 블러핑입니다."; }
+                else if (isAllIn && betRatio < 0.5) { score = 85; comment = "스택이 짧아 정석 사이즈에는 못 미쳤지만, 가진 칩을 모두 던진 올인 블러핑 시도입니다."; }
                 else { score = 80; comment = "블러핑을 시도했으나 사이즈가 정석(팟의 50~80%)을 벗어났습니다. 상대가 의도를 눈치챌 수 있습니다."; }
               }
             }
@@ -656,17 +796,32 @@
           else if (type === "bet") {
             if (isStrong) {
               if (betRatio > 1.0) { score = 80; comment = "강력한 패지만 오버벳 기미가 있습니다. 콜 범위를 좁혀 상대가 도망갈 수 있습니다."; }
-              else if (betRatio < 0.6) { score = 75; comment = "유리한 상황이지만 베팅 사이즈가 너무 작아 최대 밸류를 뽑아내지 못했습니다."; }
+              else if (betRatio < 0.6) {
+                if (isAllIn) { score = 95; comment = "스택이 짧아 정석 사이즈(60~100%)에는 못 미쳤지만, 가진 칩을 전부 투입한 올바른 올인입니다."; }
+                else { score = 75; comment = "유리한 상황이지만 베팅 사이즈가 너무 작아 최대 밸류를 뽑아내지 못했습니다."; }
+              }
               else { score = 95; comment = "상대의 콜을 유도하여 칩을 끝까지 뽑아내는 완벽한 밸류 베팅(Value Bet)입니다."; }
             }
             else if (isModerate) {
               if (betRatio > 0.5) { score = 50; comment = "어중간한 패로 너무 크게 베팅했습니다. 상대가 나보다 강한 패로만 콜을 받을 위험이 큽니다."; }
               else if (betRatio >= 0.3) { score = 85; comment = "애매한 패지만 적절한 사이즈(30~50%)로 씬 밸류(Thin Value)를 잘 뽑아냈습니다."; }
-              else { score = 65; comment = "어중간한 패로 베팅을 시도했으나 사이즈가 작아 큰 의미가 없는 플레이입니다."; }
+              else {
+                if (isAllIn) { score = 85; comment = "스택이 짧아 정석 사이즈(30~50%)에는 못 미쳤지만, 가진 칩을 전부 투입한 합리적인 올인입니다."; }
+                else { score = 65; comment = "어중간한 패로 베팅을 시도했으나 사이즈가 작아 큰 의미가 없는 플레이입니다."; }
+              }
             }
             else {
-              if (opponentsCount >= 2) { score = 30; comment = "다수를 상대로 한 무리한 퓨어 블러핑(Pure Bluff)입니다."; }
+              if (opponentsCount >= 2 && !hasKeyBlocker && positionTier === "late" && toCall === 0) {
+                score = 70; comment = "다수가 남았지만 전원 체크 뒤 마지막에 베팅하는 좋은 스틸 자리라 근거는 있습니다.";
+              }
+              else if (opponentsCount >= 2 && !hasKeyBlocker) { score = 30; comment = "다수를 상대로 한 무리한 퓨어 블러핑(Pure Bluff)입니다."; }
+              // 💡 추가: 다수를 상대해도 상대의 너트급 조합을 블로킹하고 있다면 근거 있는 블러핑으로 완화
+              else if (opponentsCount >= 2 && hasKeyBlocker) {
+                if (betRatio >= 0.5 && betRatio <= 0.8) { score = 75; comment = "다수를 상대로 한 블러핑이지만, 상대의 너트급 조합을 블로킹하고 있어 근거는 있습니다."; }
+                else { score = 60; comment = "블로커를 활용한 블러핑 아이디어는 있었지만, 다수를 상대로는 여전히 위험하고 사이즈도 아쉽습니다."; }
+              }
               else if (betRatio >= 0.5 && betRatio <= 0.8) { score = 85; comment = "상대방의 폴드를 유도하는 과감하고 정교한 사이즈의 블러핑을 시도했습니다!"; }
+              else if (isAllIn && betRatio < 0.5) { score = 75; comment = "스택이 짧아 정석 사이즈에는 못 미쳤지만, 가진 칩을 모두 던진 올인 블러핑 시도입니다."; }
               else { score = 70; comment = "블러핑 시도는 좋았으나 베팅 사이즈가 다소 아쉽습니다. (권장: 팟의 50~80%)"; }
             }
           }
@@ -692,9 +847,45 @@
           comment = `🌟 [탁월: 정확한 오즈 계산] ${brilliantReason}`;
         }
 
+        // 💡 수정: 단순히 배열상 직전 항목이 아니라, '직전 스트리트'에서 유저가 베팅했던 마지막 액션을 정확히 찾음.
+        // (베팅 후 레이즈를 당해 같은 스트리트에 콜/폴드 등 추가 액션이 기록된 경우, 배열상 직전 항목은 그 추가
+        // 액션이라 단순 idx-1로는 원래의 베팅을 놓치기 때문)
+        const prevPhaseName = phase === "turn" ? "flop" : phase === "river" ? "turn" : null;
+        const prevBetAction = prevPhaseName
+          ? [...actions].slice(0, idx).reverse().find(a => a.phase === prevPhaseName && a.type === "bet")
+          : null;
+        const barrel = prevBetAction ? analyzeBarrel(prevBetAction, act) : null;
+        let barrelNote = "";
+        if (barrel) {
+          if (type === "bet") {
+            if (barrel.facedRaise && isWeak) {
+              // 💡 추가: 직전 스트리트에서 레이즈까지 당했는데(콜만 받은 게 아니라) 근거 보강 없이 또 베팅 -> 훨씬 위험
+              barrelNote = "직전 스트리트에서 레이즈까지 당했는데 근거 보강 없이 또 베팅 — 상대가 이미 강하게 반응했던 만큼 위험 부담이 큼";
+              score = Math.min(score, 40);
+            } else if (barrel.facedRaise) {
+              barrelNote = "직전에 레이즈를 당했지만, 이번엔 강해진 패로 재베팅하는 근거 있는 시도";
+            } else if (barrel.prevBetType === "value") {
+              barrelNote = "직전 스트리트 밸류 베팅에 이어지는 자연스러운 연속 베팅(배럴링)";
+            } else if (barrel.prevBetType === "semiBluff" && barrel.improved) {
+              barrelNote = "직전 스트리트 세미블러프의 드로우가 완성되며 자연스럽게 이어진 배럴링";
+              score = Math.max(score, 95); // 좋은 스토리이므로 최소 점수 보장
+            } else if (barrel.prevBetType === "semiBluff" && !barrel.improved) {
+              barrelNote = "드로우는 완성되지 않았지만 직전 스토리를 이어가는 배럴 블러핑" + (barrel.gotCalled ? " (이미 콜을 받았던 자리라 더 신중해야 함)" : "");
+            } else if (barrel.prevBetType === "pureBluff") {
+              barrelNote = "근거 없이 베팅했던 패로 또 베팅을 이어감 — 새 근거 없는 반복 블러핑은 위험할 수 있음";
+              score = Math.min(score, 55); // 위험한 스퓨 성향이므로 상한 제한
+            }
+          } else if (type === "check" && !barrel.improved && (barrel.prevBetType === "semiBluff" || barrel.prevBetType === "pureBluff")) {
+            barrelNote = "드로우가 완성되지 않자 스토리를 억지로 이어가지 않고 깔끔하게 포기";
+          }
+        }
+
         // 💡 추가: 어떤 분기를 타든, 판정 근거(보드 대비 내 패 비교)를 항상 코멘트 끝에 덧붙임
         if (reasonText) {
           comment = `${comment} (근거: ${reasonText})`;
+        }
+        if (barrelNote) {
+          comment = `${comment} [배럴링: ${barrelNote}]`;
         }
 
         totalScore += score;
@@ -745,8 +936,8 @@
     }
 
 
-    function decideAI(ev, toCall, chips, pot, aiType, drawInfo, hole, community, currentAnte, streetStartPot, opponentsCount, opponentProfile) {
-      const { isStrong, isModerate, isWeak } = getRelativeStrength(ev, hole, community, toCall, pot);
+    function decideAI(ev, toCall, chips, pot, aiType, drawInfo, hole, community, currentAnte, streetStartPot, opponentsCount, opponentProfile, spr, positionTier, positionLabel) {
+      const { isStrong, isModerate, isWeak, hasKeyBlocker } = getRelativeStrength(ev, hole, community, toCall, pot, spr, positionLabel);
       const isRiver = community.length === 5;
       const potOdds = toCall > 0 ? toCall / (pot + toCall) : 0;
       const calculateBet = () => {
@@ -775,6 +966,11 @@
 
       // 사람이 많을수록 블러핑/무리한 벳을 줄이는 페널티 (최대 70%까지 감소)
       const multiwayPenalty = opponentsCount ? Math.max(0.3, 1 - (opponentsCount - 1) * 0.2) : 1;
+
+      // 💡 추가: 상대의 너트급 조합을 블로킹하고 있으면 블러핑 빈도를 높임 (근거 있는 블러핑이므로)
+      const blockerBoost = hasKeyBlocker ? 1.6 : 1;
+      // 💡 추가: 레이트 포지션(늦게 액션 = 남들 반응을 이미 봄)일수록 블러핑/씬밸류 빈도를 높임
+      const positionBoost = positionTier === "late" ? 1.4 : positionTier === "early" ? 0.8 : 1;
 
       // 💡 새로 추가: 유저가 벳에 잘 접으면(foldToBetRate↑) 블러핑을 늘리고, 잘 안 접으면(콜링 스테이션 성향) 블러핑을 줄임.
       // 표본 부족(opponentProfile === null)이면 중립값 1 유지.
@@ -826,7 +1022,7 @@
               if (potOdds < (0.30 + bluffCatchBonus)) return { type: "call" };
               return { type: "fold" };
             }
-            if (isWeak && toCall === 0 && Math.random() < 0.60 * multiwayPenalty * exploitMultiplier) return { type: "bet", amount: calculateThinBet(0.5, 0.8) };
+            if (isWeak && toCall === 0 && Math.random() < 0.60 * multiwayPenalty * exploitMultiplier * blockerBoost * positionBoost) return { type: "bet", amount: calculateThinBet(0.5, 0.8) };
             if (isWeak && toCall > 0 && Math.random() < 0.20 * exploitMultiplier) return { type: "bet", amount: calculateThinBet(0.5, 0.8) }; 
             if (toCall > 0 && potOdds < 0.35) return { type: "call" }; 
             if (toCall > 0) return { type: "fold" };
@@ -856,7 +1052,7 @@
               if (potOdds < (0.3 + bluffCatchBonus)) return { type: "call" }; 
               return { type: "fold" };
             }
-            if (toCall === 0 && Math.random() < 0.20 * multiwayPenalty * exploitMultiplier) return { type: "bet", amount: calculateThinBet(0.4, 0.6) };
+            if (toCall === 0 && Math.random() < 0.20 * multiwayPenalty * exploitMultiplier * blockerBoost * positionBoost) return { type: "bet", amount: calculateThinBet(0.4, 0.6) };
             if (toCall > 0) return { type: "fold" };
             return { type: "check" };
         }
@@ -873,7 +1069,7 @@
       switch (aiType) {
         case "Maniac":
           if (isStrong) return { type: "bet", amount: calculateBet() };
-          if (Math.random() < getNoisyThreshold(0.40, 0.15) * multiwayPenalty * exploitMultiplier) return { type: "bet", amount: calculateThinBet(0.5, 0.8) };
+          if (Math.random() < getNoisyThreshold(0.40, 0.15) * multiwayPenalty * exploitMultiplier * blockerBoost * positionBoost) return { type: "bet", amount: calculateThinBet(0.5, 0.8) };
           if (toCall > 0 && (isModerate || drawInfo.hitChance >= potOdds - 0.10)) return { type: "call" };
           if (toCall > 0) return { type: "fold" };
           return { type: "check" };
@@ -905,7 +1101,7 @@
             if (toCall > 0 && potOdds < getNoisyThreshold(0.30 + bluffCatchBonus, 0.05)) return { type: "call" };
             return { type: "fold" };
           }
-          if (toCall === 0 && Math.random() < getNoisyThreshold(0.20, 0.05) * multiwayPenalty * exploitMultiplier) return { type: "bet", amount: calculateThinBet(0.4, 0.6) };
+          if (toCall === 0 && Math.random() < getNoisyThreshold(0.20, 0.05) * multiwayPenalty * exploitMultiplier * blockerBoost * positionBoost) return { type: "bet", amount: calculateThinBet(0.4, 0.6) };
           if (toCall > 0 && drawInfo.hitChance >= (potOdds - bluffCatchBonus)) return { type: "call" };
           if (toCall > 0) return { type: "fold" };
           return { type: "check" };
@@ -964,6 +1160,7 @@
         allIn: {},
         roundBets: {},
         lastAction: {},
+        streetActions: {}, // 💡 추가: 이번 스트리트 각 플레이어의 최종 액션(상대 반응 추적용)
         userActions: [],
         analysisResult: null,
         currentBet: 0,
@@ -980,6 +1177,8 @@
         opponentRead: { betsFaced: 0, foldsToBet: 0, totalActions: 0, aggressiveActions: 0 },
         revealCards: false, //추가: 패 공개 여부 추적
         userStats: createEmptyUserStats(), // 💡 추가: 여러 핸드 누적 유저 성향 통계
+        gameWon: false, // 💡 추가: 상대를 모두 파산시켜 완전 승리했는지 여부
+        livePositionForUser: null, // 💡 추가: 연습모드 패널용 유저의 실시간 포지션(정확한 값)
       };
     }
 
@@ -1069,10 +1268,12 @@
           s.folded[player] = true;
           s.lastAction[player] = "폴드";
           pushLog(s, `${name}: 폴드`);
+          s.streetActions[player] = { type: "fold", amount: 0 };
         } else if (action.type === "check") {
           playSound('check', isMuted);
           s.lastAction[player] = "체크";
           pushLog(s, `${name}: 체크`);
+          s.streetActions[player] = { type: "check", amount: 0 };
         } else if (action.type === "call") {
           playSound('call', isMuted);
           const amt = Math.max(0, Math.min(toCall, s.chips[player]));
@@ -1081,6 +1282,7 @@
           if (s.chips[player] === 0) s.allIn[player] = true;
           s.lastAction[player] = amt === toCall ? `콜 ${amt}` : `콜 ${amt} (올인)`;
           pushLog(s, `${name}: 콜 (${amt})`);
+          s.streetActions[player] = { type: "call", amount: amt };
         } else if (action.type === "bet") {
           playSound('bet', isMuted);
 
@@ -1106,6 +1308,8 @@
           const label = toCall > 0 ? "레이즈" : "베팅";
           s.lastAction[player] = `${label} ${total}`;
           pushLog(s, `${name}: ${label} (${total})`);
+          // 💡 추가: toCall > 0이면 실질적으로 '레이즈'(내 베팅에 맞대응)이므로 그렇게 구분해서 기록
+          s.streetActions[player] = { type: toCall > 0 ? "raise" : "bet", amount: total };
         }
         return { raised, isFullRaise }; // 두 개의 결과를 반환
       };
@@ -1114,6 +1318,7 @@
         const players = s.players;
         s.currentBet = 0;
         s.canRaise = makeDict(players, true); //새 스트리트 시작 시 모두 권한 부활
+        s.streetActions = {}; // 💡 추가: 이번 스트리트의 각 플레이어 최종 액션 기록 초기화 (상대 반응 추적용)
         players.forEach(p => {
           s.roundBets[p] = 0;
           if (!s.folded[p]) s.lastAction[p] = "";
@@ -1132,7 +1337,6 @@
           if (s.folded[p] || s.allIn[p]) continue;
 
           s.currentActor = p;
-          setGame({ ...s });
 
           const toCall = s.currentBet - s.roundBets[p];
           let action;
@@ -1142,6 +1346,27 @@
           const drawInfo = calculateDrawOuts(currentCards, s.hole[p]);
           // 💡 수정: if/else 양쪽(유저·AI)에서 모두 쓸 수 있도록 상단으로 이동, 기준도 p 본인 제외로 일반화
           const activeOpponentsCount = players.filter(opp => !s.folded[opp] && !s.eliminated[opp] && opp !== p).length;
+          // 💡 추가: SPR 계산 - 이 팟에 아직 살아있는 전원(본인 포함) 중 가장 짧은 스택이 유효 스택
+          const liveStacksForSpr = players.filter(pl => !s.folded[pl] && !s.eliminated[pl]).map(pl => s.chips[pl]);
+          const effectiveStack = liveStacksForSpr.length > 0 ? Math.min(...liveStacksForSpr) : s.chips[p];
+          const sprInfo = calculateSPR(effectiveStack, s.pot);
+          // 💡 추가: 포지션 계산 - 이번 스트리트에서 나보다 늦게 액션하는 인원 수(queue에 남은 인원)
+          const positionInfo = calculatePosition(queue.length, activePlayers.length);
+
+          // 💡 추가: 연습모드 패널이 정확한 실시간 포지션을 보여줄 수 있도록, 유저 본인 기준 포지션을 상태에 기록.
+          // 레이즈로 큐가 재구성되는 경우까지 정확히 반영하려면 '고정 순서 근사치'가 아니라 실제 큐를 봐야 함.
+          if (p === "user") {
+            s.livePositionForUser = positionInfo;
+          } else if (queue.includes("user")) {
+            // 유저가 아직 이번 서브라운드에서 액션 전이면(큐에 남아있으면), 유저 입장에서의 포지션을 미리 계산해둔다.
+            const idxOfUser = queue.indexOf("user");
+            const actorsAfterUserFromHere = queue.length - idxOfUser - 1;
+            s.livePositionForUser = calculatePosition(actorsAfterUserFromHere, activePlayers.length);
+          }
+          // (유저가 이번 서브라운드에서 이미 액션을 마쳤고 아직 재액션 큐에 없다면, 마지막으로 기록된 값을 그대로 유지)
+
+          // 💡 수정: currentActor/livePositionForUser까지 전부 반영한 뒤 한 번에 렌더링(지연 없이 최신 상태 표시)
+          setGame({ ...s });
 
           if (p === "user") {
             action = await getUserAction(s, toCall);
@@ -1151,18 +1376,25 @@
             let actualInvested = 0;
             if (action.type === "call") actualInvested = Math.max(0, Math.min(toCall, s.chips.user));
             else if (action.type === "bet") actualInvested = Math.max(1, Math.min(toCall + (action.amount || 0), s.chips.user));
+            // 💡 추가: 이번 액션으로 스택을 전부 투입했는지(올인) 여부. 베팅 사이즈 채점 시
+            // '정석 범위에 못 미쳐도 올인이면 스택이 짧아서 어쩔 수 없었던 것'으로 구분하기 위함.
+            const isAllInAction = (action.type === "bet" || action.type === "call") && actualInvested > 0 && actualInvested >= s.chips.user;
 
             s.userActions.push({
               phase: s.phase,
               type: action.type,
               investedAmount: actualInvested,
+              isAllIn: isAllInAction,
               ev: ev,
               drawInfo: drawInfo,
               pot: s.pot,
               toCall: toCall,
               opponentsCount: activeOpponentsCount,
               hole: [...s.hole.user],
-              community: [...s.community]
+              community: [...s.community],
+              spr: sprInfo.spr,
+              positionTier: positionInfo.tier,
+              positionLabel: positionInfo.label
             });
 
             // 💡 추가: 유저의 전체 액션 횟수와 공격적 액션(베팅/레이즈) 카운트
@@ -1179,7 +1411,7 @@
             if (!gameStateRef.current.setupDone) return;
             // 💡 유저가 이번 핸드에 아직 살아있을 때만 '유저 프로필'을 반영 (이미 폴드했으면 반영할 대상이 없으므로 중립)
             const opponentProfile = (!s.folded.user && !s.eliminated.user) ? getOpponentProfile(s) : null;
-            action = decideAI(ev, toCall, s.chips[p], s.pot, s.aiPersonalities[p], drawInfo, s.hole[p], s.community, s.ante, s.streetStartPot, activeOpponentsCount, opponentProfile);
+            action = decideAI(ev, toCall, s.chips[p], s.pot, s.aiPersonalities[p], drawInfo, s.hole[p], s.community, s.ante, s.streetStartPot, activeOpponentsCount, opponentProfile, sprInfo.spr, positionInfo.tier, positionInfo.label);
             if (action.type === "bet" && s.chips[p] <= toCall) action = { type: "call" };
           }
 
@@ -1222,6 +1454,30 @@
             }
           }
         } // while 문 종료
+
+        // 💡 추가: 스트리트가 끝난 뒤, 유저가 이번 스트리트에 '베팅'했었다면(내가 공격자였다면)
+        // 상대들이 어떻게 반응했는지(콜/레이즈/폴드) 요약해서 그 액션 기록에 붙여준다.
+        // (배럴링 판단 시 "이미 콜 받았는데 또 베팅" vs "레이즈까지 당했는데 또 베팅"을 구분하기 위함)
+        for (let i = s.userActions.length - 1; i >= 0; i--) {
+          if (s.userActions[i].phase !== s.phase) break; // 이번 스트리트 기록이 아니면 중단
+          if (s.userActions[i].type !== "bet") continue; // 유저가 공격자였던 액션만 대상
+
+          const opponents = players.filter(pl => pl !== "user" && !s.eliminated[pl]);
+          const responses = opponents.map(pl => s.streetActions[pl]).filter(Boolean);
+          const calledCount = responses.filter(r => r.type === "call").length;
+          const raisedCount = responses.filter(r => r.type === "raise").length;
+          const foldedCount = responses.filter(r => r.type === "fold").length;
+
+          s.userActions[i] = {
+            ...s.userActions[i],
+            opponentResponse: {
+              calledCount, raisedCount, foldedCount,
+              gotCalled: calledCount > 0,
+              gotRaised: raisedCount > 0,
+            }
+          };
+          break; // 가장 최근 베팅 하나에만 부착
+        }
       };
 
       const finishByFold = async s => {
@@ -1347,7 +1603,20 @@
 
       const checkElimination = s => {
         s.players.forEach(p => { if (s.chips[p] <= 0) s.eliminated[p] = true; });
-        if (s.eliminated.user) s.over = true;
+        if (s.eliminated.user) {
+          s.over = true;
+          s.gameWon = false; // 유저 탈락 = 패배
+        } else if (!s.over) {
+          // 💡 추가: 유저를 제외한 모든 상대가 탈락하면 유저의 완전 승리로 게임 종료
+          const opponents = s.players.filter(p => p !== "user");
+          const allOpponentsEliminated = opponents.length > 0 && opponents.every(p => s.eliminated[p]);
+          if (allOpponentsEliminated) {
+            s.over = true;
+            s.gameWon = true;
+            pushLog(s, `🏆 모든 상대를 파산시키고 최종 승리했습니다! (최종 칩 ${s.chips.user.toLocaleString()})`);
+            playSound('win', isMuted);
+          }
+        }
       };
 
       const beginSetupGame = () => {
@@ -1417,6 +1686,7 @@
         s.userActions = [];
         s.analysisResult = null;
         s.revealCards = false;
+        s.livePositionForUser = null; // 💡 추가: 새 핸드 시작 시 이전 핸드의 포지션 정보 초기화
         s.started = true;
 
         players.forEach(p => { if (s.eliminated[p]) s.folded[p] = true; });
@@ -1487,11 +1757,27 @@
       const uiMinBet = Math.min(strictUiMin, Math.max(0, userChips - toCall));
       const maxBet = Math.max(uiMinBet, userChips - toCall);
 
-      // 💡 추가: 연습 모드용 실시간 팟오즈 / 아웃츠 / 적중확률 (유저가 스스로 계산해보기 전 참고용)
-      const practicePotOdds = toCall > 0 ? toCall / (game.pot + toCall) : 0;
+      // 💡 수정: 연습 모드용 실시간 팟오즈 / 아웃츠 / 적중확률.
+      // toCall(=game.toCallForUser)은 '내 차례가 됐을 때'만 갱신되는 값이라, 내 차례가 아닐 때 패널을 계속 띄워두면
+      // 오래된 콜 금액을 보여줄 수 있음. 그래서 언제나 최신인 currentBet/roundBets로 직접 다시 계산한다.
+      const livePracticeToCall = Math.max(0, (game.currentBet || 0) - ((game.roundBets && game.roundBets.user) || 0));
+      const practicePotOdds = livePracticeToCall > 0 ? livePracticeToCall / (game.pot + livePracticeToCall) : 0;
       const practiceDrawInfo = (game.hole && game.hole.user && game.community && game.community.length > 0)
         ? calculateDrawOuts([...game.hole.user, ...game.community], game.hole.user)
         : null;
+      // 💡 추가: 연습 모드용 실시간 SPR (이 팟에 살아있는 전원 중 가장 짧은 스택 ÷ 팟)
+      const liveStacksForPracticeSpr = (game.players || [])
+        .filter(pl => !(game.folded && game.folded[pl]) && !(game.eliminated && game.eliminated[pl]))
+        .map(pl => (game.chips && game.chips[pl]) || 0);
+      const practiceEffectiveStack = liveStacksForPracticeSpr.length > 0 ? Math.min(...liveStacksForPracticeSpr) : (game.chips && game.chips.user) || 0;
+      const practiceSprInfo = calculateSPR(practiceEffectiveStack, game.pot);
+      // 💡 추가: 연습 모드용 실시간 블로커 정보
+      const practiceBlockers = (game.hole && game.hole.user && game.community && game.community.length > 0)
+        ? calculateBlockers(game.hole.user, game.community)
+        : null;
+      // 💡 수정: 근사치 대신, 게임 로직이 실제 큐(레이즈로 인한 재구성까지 반영)를 보고 직접 계산해
+      // 상태에 저장해둔 정확한 값을 그대로 사용한다.
+      const practicePositionInfo = game.livePositionForUser || calculatePosition(0, 1);
 
       // 💡 추가: 여러 핸드 누적 통계(userStats)로부터 화면에 표시할 파생 지표 계산
       const us = game.userStats || createEmptyUserStats();
@@ -1744,7 +2030,36 @@
                     </div>
                   )}
 
-                  {game.over && (
+                  {game.over && game.gameWon && (
+                    <div style={styles.resultWrap}>
+                      <div className="victory-badge" style={styles.victoryBadge}>🏆</div>
+                      <div style={styles.victoryText}>완전 승리! 모든 상대를 파산시켰습니다</div>
+                      <div style={styles.victoryStatsRow}>
+                        <div style={styles.victoryStatItem}>
+                          <div style={styles.victoryStatLabel}>최종 칩</div>
+                          <div style={styles.victoryStatValue}>{(game.chips.user || 0).toLocaleString()}</div>
+                        </div>
+                        <div style={styles.victoryStatItem}>
+                          <div style={styles.victoryStatLabel}>진행한 핸드</div>
+                          <div style={styles.victoryStatValue}>{game.handNum}</div>
+                        </div>
+                        <div style={styles.victoryStatItem}>
+                          <div style={styles.victoryStatLabel}>시작 자금 대비</div>
+                          <div style={styles.victoryStatValue}>
+                            {game.startingChips > 0 ? `${(game.chips.user / game.startingChips).toFixed(1)}배` : "—"}
+                          </div>
+                        </div>
+                      </div>
+                      {statsView.sampleEnough && (
+                        <div style={styles.victoryStatsSub}>
+                          이번 세션 판단 정확도 — 폴드 {statsView.foldAccuracy}% · 콜 {statsView.callAccuracy}%
+                        </div>
+                      )}
+                      <button style={{ ...styles.primaryBtn, marginTop: 16 }} onClick={handleReset}>새 게임 시작</button>
+                    </div>
+                  )}
+
+                  {game.over && !game.gameWon && (
                     <div style={styles.resultWrap}>
                       <div style={styles.gameOverText}>게임 오버 — 칩을 모두 잃었습니다</div>
                       {/* 💡 수정: 마지막 핸드의 분석 결과가 있다면 피드백을 보여줌 */}
@@ -1761,12 +2076,12 @@
                           : "다른 플레이어 대기 중..."}
                       </div>
 
-                      {practiceMode && game.awaitingUser && practiceDrawInfo && (
-                        <div style={styles.practiceBox}>
+                      {practiceMode && practiceDrawInfo && (
+                        <div style={{ ...styles.practiceBox, ...(game.awaitingUser ? {} : styles.practiceBoxWaiting) }}>
                           <div style={styles.practiceRow}>
-                            <span style={styles.practiceLabel}>팟오즈</span>
+                            <span style={styles.practiceLabel}>팟오즈{!game.awaitingUser && " (현재 기준)"}</span>
                             <span style={styles.practiceValue}>
-                              {toCall > 0 ? `${(practicePotOdds * 100).toFixed(1)}%` : "베팅 없음(체크 가능)"}
+                              {livePracticeToCall > 0 ? `${(practicePotOdds * 100).toFixed(1)}%` : "베팅 없음(체크 가능)"}
                             </span>
                           </div>
                           <div style={styles.practiceRow}>
@@ -1778,6 +2093,22 @@
                           <div style={styles.practiceRow}>
                             <span style={styles.practiceLabel}>적중확률</span>
                             <span style={styles.practiceValue}>{(practiceDrawInfo.hitChance * 100).toFixed(1)}%</span>
+                          </div>
+                          <div style={styles.practiceRow}>
+                            <span style={styles.practiceLabel}>SPR</span>
+                            <span style={styles.practiceValue}>
+                              {practiceSprInfo.spr !== null ? `${practiceSprInfo.spr.toFixed(1)} (${practiceSprInfo.label})` : "—"}
+                            </span>
+                          </div>
+                          {practiceBlockers && practiceBlockers.blockerNote && (
+                            <div style={styles.practiceRow}>
+                              <span style={styles.practiceLabel}>블로커</span>
+                              <span style={styles.practiceValue}>{practiceBlockers.blockerNote}</span>
+                            </div>
+                          )}
+                          <div style={styles.practiceRow}>
+                            <span style={styles.practiceLabel}>포지션</span>
+                            <span style={styles.practiceValue}>{practicePositionInfo.label}</span>
                           </div>
                         </div>
                       )}
@@ -2161,8 +2492,9 @@
       practiceBox: {
         display: "flex", flexDirection: "column", gap: 4,
         background: "rgba(143,174,156,0.08)", border: "1px solid rgba(143,174,156,0.3)",
-        borderRadius: 10, padding: "10px 14px",
+        borderRadius: 10, padding: "10px 14px", transition: "opacity 0.2s",
       },
+      practiceBoxWaiting: { opacity: 0.6 },
       practiceRow: { display: "flex", justifyContent: "space-between", alignItems: "baseline" },
       practiceLabel: { fontSize: 12, color: "#8FAE9C", fontFamily: "'Courier New', monospace", letterSpacing: 1 },
       practiceValue: { fontSize: 13, color: "#EFE7D2", fontFamily: "'Courier New', monospace", fontWeight: 700 },
@@ -2240,6 +2572,19 @@
       phaseComment: { fontSize: 13, color: "#D9CFB0", lineHeight: 1.5, margin: 0 },
 
       gameOverText: { fontSize: 18, color: "#c96a5a" },
+      victoryBadge: { fontSize: 56, textAlign: "center", marginBottom: 8, lineHeight: 1 },
+      victoryText: {
+        fontSize: 20, color: "#F4EDD8", fontWeight: 700, textAlign: "center",
+        marginBottom: 20, textShadow: "0 0 16px rgba(201,164,76,0.6)",
+      },
+      victoryStatsRow: { display: "flex", gap: 14, justifyContent: "center", flexWrap: "wrap" },
+      victoryStatItem: {
+        background: "rgba(201,164,76,0.08)", border: "1px solid rgba(201,164,76,0.35)",
+        borderRadius: 12, padding: "12px 20px", minWidth: 110, textAlign: "center",
+      },
+      victoryStatLabel: { fontSize: 11, color: "#8FAE9C", fontFamily: "'Courier New', monospace", letterSpacing: 1, marginBottom: 6 },
+      victoryStatValue: { fontSize: 20, color: "#C9A44C", fontWeight: 700 },
+      victoryStatsSub: { fontSize: 13, color: "#8FAE9C", textAlign: "center", marginTop: 16, fontFamily: "'Courier New', monospace" },
       logPanel: {
         width: 280, flexShrink: 0, background: "rgba(0,0,0,0.35)", borderRadius: 16,
         border: "1px solid rgba(201,164,76,0.2)", display: "flex", flexDirection: "column",
