@@ -38,6 +38,25 @@
     .victory-badge {
       animation: victoryPulse 1.7s ease-in-out infinite;
     }
+
+    /* 💡 추가: 럭키 코인 토스(피젯) 애니메이션 - 점프(상하 이동)와 그림자 수축을 분리해서
+       입체감을 만든다. 회전(rotateY)은 인라인 style의 transition으로 별도 처리. */
+    @keyframes coinJump {
+      0% { transform: translateY(0); }
+      50% { transform: translateY(-70px); }
+      100% { transform: translateY(0); }
+    }
+    @keyframes shadowShrink {
+      0% { transform: translateX(-50%) scale(1); opacity: 0.7; }
+      50% { transform: translateX(-50%) scale(0.4); opacity: 0.2; }
+      100% { transform: translateX(-50%) scale(1); opacity: 0.7; }
+    }
+    .coin-jumping {
+      animation: coinJump 0.8s ease-in-out forwards;
+    }
+    .shadow-shrinking {
+      animation: shadowShrink 0.8s ease-in-out forwards;
+    }
   </style>
 </head>
 
@@ -65,7 +84,8 @@
       call: "./audio/call.mp3",
       fold: "./audio/fold.mp3",
       win: "./audio/win.mp3",
-      check: "./audio/check.mp3"
+      check: "./audio/check.mp3",
+      coin: "./audio/coin.mp3"
     };
 
     // 💡 추가: 바이인 시스템 - 뱅크롤(세션을 넘어 유지되는 총자산)과 차트 시트(구 연습모드) 구매 여부를
@@ -83,6 +103,17 @@
       1000000: 2000000, // 100만 방: 2배수 (최종 보스 방. 진정한 고수만 도달 가능)
     };
     const CHART_SHEET_PRICE = 20000;
+    // 💡 추가: 럭키 코인 토스(피젯) 기본 티어 가격. 전략적 가치가 없는 순수 재미 아이템이라
+    // 실제 판단력에 영향을 주는 차트 시트보다 낮게 잡았다. 은화/금화/다이아몬드/홀로그램 같은
+    // 업그레이드 티어는 이번엔 범위 밖 - 나중에 별도로 추가.
+    const LUCKY_COIN_PRICE = 5000;
+
+    // 💡 수정: 럭키 코인 토스는 실제 구매 가능해졌으므로 제거. 나머지 3개는 여전히 개발중.
+    const DEV_SHOP_ITEMS = [
+      { icon: "🃏", name: "ASMR 칩 셔플", desc: "클릭하면 칩이 촤르륵 갈라졌다 합쳐지는 피젯" },
+      { icon: "🍅", name: "분노의 투척 아이템", desc: "AI에게 토마토·달걀 등을 던지는 틸트 관리 아이템" },
+      { icon: "🎨", name: "VIP 테이블 펠트 & 네임플레이트", desc: "테이블 색상과 좌석 테두리를 바꾸는 스킨" },
+    ];
 
     function loadMeta() {
       try {
@@ -92,10 +123,11 @@
           return {
             bankroll: typeof parsed.bankroll === "number" && isFinite(parsed.bankroll) ? parsed.bankroll : DEFAULT_BANKROLL,
             ownsChartSheet: !!parsed.ownsChartSheet,
+            ownsLuckyCoin: !!parsed.ownsLuckyCoin, // 💡 추가: 럭키 코인 토스 구매 여부
           };
         }
       } catch (e) { /* localStorage 접근 불가 등 - 기본값으로 폴백 */ }
-      return { bankroll: DEFAULT_BANKROLL, ownsChartSheet: false };
+      return { bankroll: DEFAULT_BANKROLL, ownsChartSheet: false, ownsLuckyCoin: false };
     }
 
     function saveMeta(meta) {
@@ -1320,6 +1352,104 @@
       };
     }
 
+    // 🪙 럭키 코인 피젯 컴포넌트 - 전략적 가치는 전혀 없는 순수 재미용 아이템.
+    // 클릭할 때마다 동전이 튀어오르며(점프) 3D로 회전(스핀)해서 앞/뒷면이 바뀐다.
+    function LuckyCoin({ isMutedSfx }) {
+      const [rotation, setRotation] = useState(0);
+      const [isFlipping, setIsFlipping] = useState(false);
+
+      const toss = () => {
+        if (isFlipping) return;
+        setIsFlipping(true);
+
+        // 💡 동전 전용 사운드(coin.mp3)가 아직 없어서 기존 베팅 사운드를 임시로 차용
+        playSound('coin', false, isMutedSfx);
+
+        // 랜덤 앞/뒷면 결정 (true: 앞면(♠), false: 뒷면(★))
+        const landOnHeads = Math.random() > 0.5;
+
+        // 기본 4바퀴(720도) 회전 + 결과에 맞춘 각도 보정
+        const spins = 4;
+        let nextRotation = rotation + (spins * 180);
+
+        if (landOnHeads && (nextRotation % 360 !== 0)) {
+          nextRotation += 180;
+        } else if (!landOnHeads && (nextRotation % 360 === 0)) {
+          nextRotation += 180;
+        }
+
+        setRotation(nextRotation);
+
+        // 애니메이션 시간(0.8s)이 끝난 후 상태 초기화
+        setTimeout(() => setIsFlipping(false), 800);
+      };
+
+      return (
+        <div style={coinStyles.container} onClick={toss} title="행운의 코인 토스 (클릭)">
+          {/* 그림자 */}
+          <div
+            style={coinStyles.shadow}
+            className={isFlipping ? "shadow-shrinking" : ""}
+          />
+
+          {/* 점프(상하 이동)를 담당하는 래퍼 */}
+          <div className={isFlipping ? "coin-jumping" : ""} style={coinStyles.jumpWrapper}>
+            {/* 회전(3D Spin)을 담당하는 이너 */}
+            <div style={{ ...coinStyles.spinInner, transform: `rotateY(${rotation}deg)` }}>
+
+              {/* 앞면 (골드) */}
+              <div style={{ ...coinStyles.face, ...coinStyles.front }}>
+                <div style={coinStyles.innerCircle}>♠</div>
+              </div>
+
+              {/* 뒷면 (다크 그린) */}
+              <div style={{ ...coinStyles.face, ...coinStyles.back }}>
+                <div style={coinStyles.innerCircle}>★</div>
+              </div>
+
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    const coinStyles = {
+      container: {
+        position: "relative", width: 44, height: 44, cursor: "pointer",
+        perspective: "800px", // 2D 평면을 3D 공간처럼 보이게 함
+      },
+      shadow: {
+        position: "absolute", bottom: -6, left: "50%",
+        width: 30, height: 8, background: "rgba(0,0,0,0.8)",
+        borderRadius: "50%", filter: "blur(2px)",
+      },
+      jumpWrapper: { width: "100%", height: "100%", position: "relative" },
+      spinInner: {
+        width: "100%", height: "100%", position: "relative",
+        transformStyle: "preserve-3d", // 앞장과 뒷장이 등을 맞대고 있게 유지
+        transition: "transform 0.8s cubic-bezier(0.2, 0.8, 0.3, 1)",
+      },
+      face: {
+        position: "absolute", width: "100%", height: "100%", borderRadius: "50%",
+        backfaceVisibility: "hidden",
+        display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20,
+        boxShadow: "0 4px 8px rgba(0,0,0,0.5), inset 0 0 4px rgba(255,255,255,0.4)",
+        border: "2px solid #D9B95C", boxSizing: "border-box"
+      },
+      front: {
+        background: "linear-gradient(135deg, #C9A44C, #8B6914)", color: "#1a1300",
+      },
+      back: {
+        background: "linear-gradient(135deg, #2b4a3d, #14241d)", color: "#C9A44C",
+        transform: "rotateY(180deg)",
+      },
+      innerCircle: {
+        width: "65%", height: "65%", borderRadius: "50%",
+        border: "1px dashed rgba(255,255,255,0.3)",
+        display: "flex", alignItems: "center", justifyContent: "center"
+      }
+    };
+
     function NoPreflopHoldem() {
       const [game, setGame] = useState(initialGame());
       const [betAmount, setBetAmount] = useState(initialGame().ante * 5);
@@ -1334,6 +1464,7 @@
       // 💡 추가: window.confirm/alert 대신 쓰는 사이트 내 모달 상태.
       // onConfirm이 있으면 '취소/확인' 두 버튼(확인 다이얼로그), 없으면 '확인' 한 버튼(알림)만 표시.
       const [modal, setModal] = useState(null); // { message, onConfirm?: fn } | null
+      const [showShop, setShowShop] = useState(false); // 💡 추가: 상점 창 표시 여부
       const askConfirm = (message, onConfirm) => setModal({ message, onConfirm });
       const showAlert = message => setModal({ message, onConfirm: null });
       const modalOverlay = modal && (
@@ -1431,6 +1562,17 @@
       const handleFullReset = () => {
         askConfirm(`뱅크롤을 ${DEFAULT_BANKROLL.toLocaleString()}으로 되돌리고 처음부터 다시 시작하시겠습니까?`, () => {
           setMeta(m => ({ ...m, bankroll: DEFAULT_BANKROLL }));
+          setGame(initialGame());
+          setBetAmount(initialGame().ante * 5);
+          runningRef.current = false;
+        });
+      };
+
+      // 💡 추가: 언제든 누를 수 있는 테스트용 전체 초기화. handleFullReset과 달리 차트 시트 구매내역까지
+      // 포함해서 완전히 지운다(localStorage도 함께). 뱅크롤=0일 때만 뜨는 게 아니라 설정 화면에서 항상 접근 가능.
+      const handleDevReset = () => {
+        askConfirm("테스트용 전체 초기화 — 뱅크롤과 차트 시트 구매내역을 모두 지우고 처음 상태(뱅크롤 100,000, 미구매)로 되돌립니다. 계속할까요?", () => {
+          setMeta({ bankroll: DEFAULT_BANKROLL, ownsChartSheet: false, ownsLuckyCoin: false });
           setGame(initialGame());
           setBetAmount(initialGame().ante * 5);
           runningRef.current = false;
@@ -2048,6 +2190,9 @@
                 <div style={styles.gameOverText}>뱅크롤이 모두 소진되었습니다</div>
                 <p style={styles.setupDesc}>더 이상 어떤 바이인도 선택할 수 없어요.<br />뱅크롤을 초기화하고 처음부터 다시 시작할 수 있습니다.</p>
                 <button style={{ ...styles.primaryBtn, marginTop: 12 }} onClick={handleFullReset}>뱅크롤 초기화하고 다시 시작</button>
+                <div style={styles.devResetLinkWrap}>
+                  <span style={styles.devResetLink} onClick={handleDevReset}>🔧 전체 초기화 (차트 시트 구매내역 포함, 테스트용)</span>
+                </div>
               </div>
               {modalOverlay}
             </div>
@@ -2083,6 +2228,15 @@
           if (!canBuyChartSheet) return;
           askConfirm(`차트 시트를 ${CHART_SHEET_PRICE.toLocaleString()}에 구매하시겠습니까? (뱅크롤에서 차감, 영구 소유)`, () => {
             setMeta(m => ({ ...m, bankroll: m.bankroll - CHART_SHEET_PRICE, ownsChartSheet: true }));
+          });
+        };
+
+        // 💡 추가: 럭키 코인 토스 구매 로직 (차트 시트와 동일한 패턴)
+        const canBuyLuckyCoin = !meta.ownsLuckyCoin && meta.bankroll >= LUCKY_COIN_PRICE;
+        const buyLuckyCoin = () => {
+          if (!canBuyLuckyCoin) return;
+          askConfirm(`럭키 코인 토스를 ${LUCKY_COIN_PRICE.toLocaleString()}에 구매하시겠습니까? (뱅크롤에서 차감, 영구 소유)`, () => {
+            setMeta(m => ({ ...m, bankroll: m.bankroll - LUCKY_COIN_PRICE, ownsLuckyCoin: true }));
           });
         };
 
@@ -2179,20 +2333,15 @@
                 </div>
               </div>
 
-              {/* 💡 추가: 차트 시트(구 연습모드) 구매 섹션 */}
+              {/* 💡 수정: 차트 시트 구매 섹션을 '상점' 진입 박스로 교체 */}
               <div style={styles.setupItemWrap}>
-                <div style={styles.setupItemTitle}>차트 시트</div>
-                {meta.ownsChartSheet ? (
-                  <div style={styles.chartSheetOwned}>✅ 보유 중 — 게임 중 팟오즈/아웃츠/SPR/블로커/포지션을 실시간으로 볼 수 있어요</div>
-                ) : (
-                  <button
-                    style={{ ...styles.setupStepBtn, ...(canBuyChartSheet ? {} : styles.buyInPresetBtnDisabled), padding: "10px 16px" }}
-                    disabled={!canBuyChartSheet}
-                    onClick={buyChartSheet}
-                  >
-                    🧮 차트 시트 구매 ({CHART_SHEET_PRICE.toLocaleString()})
-                  </button>
-                )}
+                <div style={styles.setupItemTitle}>상점</div>
+                <button
+                  style={{ ...styles.setupStepBtn, padding: "10px 16px" }}
+                  onClick={() => setShowShop(true)}
+                >
+                  🛒 상점 열기{meta.ownsChartSheet ? " (차트 시트 보유중)" : ""}
+                </button>
               </div>
 
               <button
@@ -2202,8 +2351,76 @@
               >
                 게임 시작
               </button>
+
+              {/* 💡 추가: 뱅크롤=0이 아니어도 언제든 누를 수 있는 테스트용 전체 초기화 */}
+              <div style={styles.devResetLinkWrap}>
+                <span style={styles.devResetLink} onClick={handleDevReset}>🔧 전체 초기화 (테스트용)</span>
+              </div>
             </div>
             {modalOverlay}
+
+            {/* 💡 추가: 상점 모달 - 차트 시트는 실제 구매 가능, 나머지 4종은 개발중 표시로 흐리게 */}
+            {showShop && (
+              <div style={styles.shopOverlay} onClick={() => setShowShop(false)}>
+                <div style={styles.shopBox} onClick={e => e.stopPropagation()}>
+                  <div style={styles.shopHeader}>
+                    <div style={styles.shopTitle}>🛒 상점</div>
+                    <button style={styles.shopCloseBtn} onClick={() => setShowShop(false)}>✕</button>
+                  </div>
+                  <div style={styles.bankrollBadge}>💰 뱅크롤 {meta.bankroll.toLocaleString()}</div>
+                  <div style={styles.shopItemList}>
+                    {/* 차트 시트 - 실제 구매 가능한 유일한 아이템 */}
+                    <div style={styles.shopItem}>
+                      <div style={styles.shopItemInfo}>
+                        <div style={styles.shopItemName}>🧮 차트 시트</div>
+                        <div style={styles.shopItemDesc}>게임 중 팟오즈/아웃츠/SPR/블로커/포지션을 실시간으로 계산해서 보여줍니다.</div>
+                      </div>
+                      {meta.ownsChartSheet ? (
+                        <div style={styles.shopOwnedTag}>✅ 보유중</div>
+                      ) : (
+                        <button
+                          style={{ ...styles.shopBuyBtn, ...(canBuyChartSheet ? {} : styles.buyInPresetBtnDisabled) }}
+                          disabled={!canBuyChartSheet}
+                          onClick={buyChartSheet}
+                        >
+                          {CHART_SHEET_PRICE.toLocaleString()}
+                        </button>
+                      )}
+                    </div>
+
+                    {/* 💡 추가: 럭키 코인 토스 - 실제 구매 가능 (전략적 가치 없는 순수 재미 아이템) */}
+                    <div style={styles.shopItem}>
+                      <div style={styles.shopItemInfo}>
+                        <div style={styles.shopItemName}>🪙 럭키 코인 토스</div>
+                        <div style={styles.shopItemDesc}>클릭하면 동전이 튀어올라 빙글 돌며 앞/뒷면이 바뀌는 피젯. 판단에는 영향이 없어요.</div>
+                      </div>
+                      {meta.ownsLuckyCoin ? (
+                        <div style={styles.shopOwnedTag}>✅ 보유중</div>
+                      ) : (
+                        <button
+                          style={{ ...styles.shopBuyBtn, ...(canBuyLuckyCoin ? {} : styles.buyInPresetBtnDisabled) }}
+                          disabled={!canBuyLuckyCoin}
+                          onClick={buyLuckyCoin}
+                        >
+                          {LUCKY_COIN_PRICE.toLocaleString()}
+                        </button>
+                      )}
+                    </div>
+
+                    {/* 개발중 아이템 3종 */}
+                    {DEV_SHOP_ITEMS.map(item => (
+                      <div key={item.name} style={{ ...styles.shopItem, ...styles.shopItemDisabled }}>
+                        <div style={styles.shopItemInfo}>
+                          <div style={styles.shopItemName}>{item.icon} {item.name}</div>
+                          <div style={styles.shopItemDesc}>{item.desc}</div>
+                        </div>
+                        <div style={styles.shopDevTag}>개발중</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         );
       }
@@ -2331,33 +2548,44 @@
                   </div>
 
                   <div style={styles.userRow}>
-                    {/* 💡 나(User)의 승리 확인 및 하이라이트 처리 */}
-                    {(() => {
-                      const winAmountUser = game.handWinners ? (game.handWinners['user'] || 0) : 0;
-                      const isUserWinner = winAmountUser > 0 && (game.phase === "showdown" || game.phase === "foldwin");
+                    <div style={styles.userInfoWithItems}>
+                      {/* 💡 나(User)의 승리 확인 및 하이라이트 처리 */}
+                      {(() => {
+                        const winAmountUser = game.handWinners ? (game.handWinners['user'] || 0) : 0;
+                        const isUserWinner = winAmountUser > 0 && (game.phase === "showdown" || game.phase === "foldwin");
 
-                      return (
-                        <div style={{
-                          ...styles.userInfo,
-                          ...(isUserCurrent ? styles.activeActor : {}),
-                          ...(isUserWinner ? styles.winnerGlow : {}), // 황금빛 테두리 효과
-                          position: "relative" // 배지 위치를 잡기 위해 추가
-                        }}>
-                          {/* 💡 플레이어 승리 배지 (박스 상단 중앙) */}
-                          {isUserWinner && (
-                            <div style={{ ...styles.winBadge, top: -14, left: "50%", transform: "translateX(-50%)" }}>
-                              +{winAmountUser.toLocaleString()}
-                            </div>
-                          )}
-                          <div style={styles.seatName}>나 (User)</div>
-                          <div style={styles.seatChips}>칩 {userChips.toLocaleString()}</div>
-                          {game.lastAction.user && !game.awaitingUser && !isUserWinner && (
-                            <div style={styles.actionBadge}>{game.lastAction.user}</div>
-                          )}
-                          {game.eliminated.user && <div style={styles.badBadge}>탈락</div>}
+                        return (
+                          <div style={{
+                            ...styles.userInfo,
+                            ...(isUserCurrent ? styles.activeActor : {}),
+                            ...(isUserWinner ? styles.winnerGlow : {}), // 황금빛 테두리 효과
+                            position: "relative" // 배지 위치를 잡기 위해 추가
+                          }}>
+                            {/* 💡 플레이어 승리 배지 (박스 상단 중앙) */}
+                            {isUserWinner && (
+                              <div style={{ ...styles.winBadge, top: -14, left: "50%", transform: "translateX(-50%)" }}>
+                                +{winAmountUser.toLocaleString()}
+                              </div>
+                            )}
+                            <div style={styles.seatName}>나 (User)</div>
+                            <div style={styles.seatChips}>칩 {userChips.toLocaleString()}</div>
+                            {game.lastAction.user && !game.awaitingUser && !isUserWinner && (
+                              <div style={styles.actionBadge}>{game.lastAction.user}</div>
+                            )}
+                            {game.eliminated.user && <div style={styles.badBadge}>탈락</div>}
+                          </div>
+                        );
+                      })()}
+
+                      {/* 💡 추가: 구매한 피젯 아이템들이 유저 박스 오른쪽에 나열됨 (지금은 럭키 코인 하나뿐이지만
+                          앞으로 늘어날 걸 감안해 목록형 컨테이너로 구성. 아직 '챙겨갈 아이템 선택' 기능은 없어서
+                          보유한 아이템은 항상 전부 표시됨) */}
+                      {meta.ownsLuckyCoin && (
+                        <div style={styles.fidgetItemsRow}>
+                          <LuckyCoin isMutedSfx={isMutedSfx} />
                         </div>
-                      );
-                    })()}
+                      )}
+                    </div>
                     <div style={styles.userCards}>
                       {(game.hole.user || [undefined, undefined]).map((c, i) => (
                         <CardView key={i} card={c} big />
@@ -2736,10 +2964,18 @@
         width: 100, textAlign: "center", margin: "0 8px"
       },
       // 💡 추가: 바이인 시스템 관련 스타일
-      // 💡 추가: window.confirm/alert 대체용 사이트 내 모달 스타일
+      // 💡 수정: window.confirm/alert 대체용 사이트 내 모달 스타일.
+      // z-index를 상점 모달(shopOverlay, 999)보다 높게(1100) 둬서, 상점 안에서 뜨는 확인창이 항상
+      // 최상단에 보이도록 함(예전엔 둘 다 같은 z-index라 DOM 순서상 상점이 위로 덮어버리는 버그가 있었음).
       modalOverlay: {
         position: "fixed", inset: 0, background: "rgba(0,0,0,0.65)",
-        display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000,
+        display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1100,
+      },
+      // 💡 추가: 상점 모달 전용 오버레이 - modalOverlay보다 z-index를 낮게 둬서, 상점 위에 뜨는
+      // 확인창(구매 확인 등)이 항상 상점보다 위에 보이게 한다.
+      shopOverlay: {
+        position: "fixed", inset: 0, background: "rgba(0,0,0,0.65)",
+        display: "flex", alignItems: "center", justifyContent: "center", zIndex: 999,
       },
       modalBox: {
         background: "#141812", border: "1px solid rgba(201,164,76,0.5)", borderRadius: 16,
@@ -2756,6 +2992,42 @@
         padding: "8px 18px", borderRadius: 8, border: "1px solid #C9A44C",
         background: "rgba(201,164,76,0.25)", color: "#F4EDD8", fontSize: 13, fontWeight: 700,
         cursor: "pointer", fontFamily: "'Courier New', monospace",
+      },
+      // 💡 추가: 상점 모달 스타일
+      shopBox: {
+        background: "#141812", border: "1px solid rgba(201,164,76,0.5)", borderRadius: 16,
+        padding: "22px 24px", maxWidth: 460, width: "90%", maxHeight: "80vh", overflowY: "auto",
+        boxShadow: "0 12px 40px rgba(0,0,0,0.6)",
+      },
+      shopHeader: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 },
+      shopTitle: { fontSize: 18, color: "#F4EDD8", fontWeight: 700, fontFamily: "'Georgia', serif" },
+      shopCloseBtn: {
+        background: "transparent", border: "none", color: "#8FAE9C", fontSize: 18,
+        cursor: "pointer", padding: 4, lineHeight: 1,
+      },
+      shopItemList: { display: "flex", flexDirection: "column", gap: 10, marginTop: 14 },
+      shopItem: {
+        display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12,
+        background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)",
+        borderRadius: 10, padding: "12px 14px",
+      },
+      shopItemDisabled: { opacity: 0.4 },
+      shopItemInfo: { display: "flex", flexDirection: "column", gap: 4, textAlign: "left" },
+      shopItemName: { fontSize: 14, color: "#F4EDD8", fontWeight: 700 },
+      shopItemDesc: { fontSize: 12, color: "#B7AF97", lineHeight: 1.5 },
+      shopOwnedTag: {
+        fontSize: 12, color: "#8FAE9C", fontFamily: "'Courier New', monospace",
+        whiteSpace: "nowrap", flexShrink: 0,
+      },
+      shopBuyBtn: {
+        padding: "8px 16px", borderRadius: 8, border: "1px solid #C9A44C",
+        background: "rgba(201,164,76,0.25)", color: "#F4EDD8", fontSize: 13, fontWeight: 700,
+        cursor: "pointer", fontFamily: "'Courier New', monospace", whiteSpace: "nowrap", flexShrink: 0,
+      },
+      shopDevTag: {
+        fontSize: 11, color: "#8FAE9C", background: "rgba(255,255,255,0.06)",
+        border: "1px solid rgba(255,255,255,0.15)", borderRadius: 8, padding: "4px 10px",
+        fontFamily: "'Courier New', monospace", whiteSpace: "nowrap", flexShrink: 0,
       },
       bankrollBadge: {
         display: "inline-block", background: "rgba(201,164,76,0.12)", border: "1px solid rgba(201,164,76,0.4)",
@@ -2779,7 +3051,14 @@
       buyInCarouselCenter: { display: "flex", flexDirection: "column", alignItems: "center", gap: 4, minWidth: 140 },
       buyInLockedValue: { color: "#6b6b6b" },
       buyInSubNote: { fontSize: 11, color: "#8FAE9C", fontFamily: "'Courier New', monospace", textAlign: "center" },
-      chartSheetOwned: { fontSize: 13, color: "#8FAE9C", lineHeight: 1.6, textAlign: "center" },
+      // 💡 수정: 어두운 배경(rgba(0,0,0,0.3))에 회색(#6b6b6b) 글자라 거의 안 보이던 문제 수정.
+      // 대비가 확실한 색상 + 테두리를 둬서 "안 보인다"는 문제가 재발하지 않게 함.
+      devResetLinkWrap: { textAlign: "center", marginTop: 14 },
+      devResetLink: {
+        display: "inline-block", fontSize: 12, color: "#EFD9A0",
+        fontFamily: "'Courier New', monospace", cursor: "pointer",
+        border: "1px solid rgba(201,164,76,0.4)", borderRadius: 8, padding: "6px 12px",
+      },
       // 💡 승리 시 박스가 황금색으로 빛나고 살짝 커지는 효과
       winnerGlow: {
         boxShadow: "0 0 24px 6px rgba(255, 215, 0, 0.45)",
@@ -2882,6 +3161,9 @@
       communityRow: { display: "flex", gap: 8 },
       phaseLabel: { fontFamily: "'Courier New', monospace", fontSize: 12, color: "#8FAE9C", letterSpacing: 2 },
       userRow: { display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "auto", paddingTop: 8 },
+      // 💡 추가: 유저 박스 + 피젯 아이템들을 한 그룹으로 묶는 wrapper (userCards와는 반대편에 붙어있음)
+      userInfoWithItems: { display: "flex", alignItems: "center", gap: 14 },
+      fidgetItemsRow: { display: "flex", alignItems: "center", gap: 10 },
       userInfo: {
         display: "flex", flexDirection: "column", gap: 4,
         padding: "8px 12px", borderRadius: 12, border: "2px solid transparent",
