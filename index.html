@@ -57,8 +57,87 @@
     .shadow-shrinking {
       animation: shadowShrink 0.8s ease-in-out forwards;
     }
+
+    /* 💡 1.2초 버전에 맞춘 타이밍 재분배
+       - 0~15%: 양옆으로 갈라짐
+       - 15~32%: 가운데로 밀어넣으며 텐트 모양(아치) 만들기
+       - 32~68%: L1부터 R3까지 순차적으로 하강하며 지그재그 정렬
+       - 68~85%: 지그재그 상태 유지(Hold)하며 시각적 만족감 제공
+       - 85~100%: 부드럽게 중앙으로 슬라이드하며 최종 정렬 (부자연스러움 해결) */
+
+    @keyframes shuffleL1 {
+      0% { transform: translate(0, 0) rotate(0deg); }
+      15% { transform: translate(-22px, 0) rotate(0deg); }
+      32% { transform: translate(-17px, -14px) rotate(-28deg); }
+      38%, 85% { transform: translate(-8px, 0) rotate(0deg); } 
+      100% { transform: translate(0, 0) rotate(0deg); }
+    }
+    
+    @keyframes shuffleR1 {
+      0% { transform: translate(0, 0) rotate(0deg); }
+      15% { transform: translate(22px, 6px) rotate(0deg); }
+      32%, 38% { transform: translate(17px, -8px) rotate(28deg); } 
+      44%, 85% { transform: translate(8px, 0) rotate(0deg); }      
+      100% { transform: translate(0, 0) rotate(0deg); }
+    }
+
+    @keyframes shuffleL2 {
+      0% { transform: translate(0, 0) rotate(0deg); }
+      15% { transform: translate(-22px, 6px) rotate(0deg); }
+      32% { transform: translate(-17px, -8px) rotate(-28deg); }
+      38%, 44% { transform: translate(-18px, -11px) rotate(-31deg); } 
+      50%, 85% { transform: translate(-8px, 0) rotate(0deg); }     
+      100% { transform: translate(0, 0) rotate(0deg); }
+    }
+
+    @keyframes shuffleR2 {
+      0% { transform: translate(0, 0) rotate(0deg); }
+      15% { transform: translate(22px, 12px) rotate(0deg); }
+      32%, 38% { transform: translate(17px, -2px) rotate(28deg); }
+      44%, 50% { transform: translate(18px, -5px) rotate(31deg); }
+      56%, 85% { transform: translate(8px, 0) rotate(0deg); }      
+      100% { transform: translate(0, 0) rotate(0deg); }
+    }
+
+    @keyframes shuffleL3 {
+      0% { transform: translate(0, 0) rotate(0deg); }
+      15% { transform: translate(-22px, 12px) rotate(0deg); }
+      32% { transform: translate(-17px, -2px) rotate(-28deg); }
+      38%, 44% { transform: translate(-18px, -5px) rotate(-31deg); } 
+      50%, 56% { transform: translate(-19px, -8px) rotate(-34deg); } 
+      62%, 85% { transform: translate(-8px, 0) rotate(0deg); }     
+      100% { transform: translate(0, 0) rotate(0deg); }
+    }
+
+    @keyframes shuffleR3 {
+      0% { transform: translate(0, 0) rotate(0deg); }
+      15% { transform: translate(22px, 18px) rotate(0deg); }
+      32%, 38% { transform: translate(17px, 4px) rotate(28deg); }
+      44%, 50% { transform: translate(18px, 1px) rotate(31deg); }
+      56%, 62% { transform: translate(19px, -2px) rotate(34deg); }
+      68%, 85% { transform: translate(8px, 0) rotate(0deg); }      
+      100% { transform: translate(0, 0) rotate(0deg); }
+    }
+
+    @keyframes shadowPulseFlat {
+      0% { transform: translateX(-50%) scaleX(1); opacity: 0.5; }
+      15% { transform: translateX(-50%) scaleX(2.0); opacity: 0.2; }
+      32% { transform: translateX(-50%) scaleX(1.6); opacity: 0.2; }
+      85% { transform: translateX(-50%) scaleX(1.3); opacity: 0.35; }
+      100% { transform: translateX(-50%) scaleX(1); opacity: 0.5; }
+    }
+
+    /* 애니메이션 시간을 1.2s로 연장 */
+    .shuffle-l1 { animation: shuffleL1 1.2s cubic-bezier(0.3, 0.8, 0.3, 1) forwards; }
+    .shuffle-r1 { animation: shuffleR1 1.2s cubic-bezier(0.3, 0.8, 0.3, 1) forwards; }
+    .shuffle-l2 { animation: shuffleL2 1.2s cubic-bezier(0.3, 0.8, 0.3, 1) forwards; }
+    .shuffle-r2 { animation: shuffleR2 1.2s cubic-bezier(0.3, 0.8, 0.3, 1) forwards; }
+    .shuffle-l3 { animation: shuffleL3 1.2s cubic-bezier(0.3, 0.8, 0.3, 1) forwards; }
+    .shuffle-r3 { animation: shuffleR3 1.2s cubic-bezier(0.3, 0.8, 0.3, 1) forwards; }
+    .shadow-pulse-flat { animation: shadowPulseFlat 1.2s cubic-bezier(0.3, 0.8, 0.3, 1) forwards; }
   </style>
 </head>
+
 
 <body>
   <div id="root"></div>
@@ -85,7 +164,8 @@
       fold: "./audio/fold.mp3",
       win: "./audio/win.mp3",
       check: "./audio/check.mp3",
-      coin: "./audio/coin.mp3"
+      coin: "./audio/coin.mp3",
+      chip_ASMR: "./audio/chip_ASMR.mp3" // 💡 추가: 칩 셔플 전용 ASMR 사운드
     };
 
     // 💡 추가: 바이인 시스템 - 뱅크롤(세션을 넘어 유지되는 총자산)과 차트 시트(구 연습모드) 구매 여부를
@@ -107,10 +187,11 @@
     // 실제 판단력에 영향을 주는 차트 시트보다 낮게 잡았다. 은화/금화/다이아몬드/홀로그램 같은
     // 업그레이드 티어는 이번엔 범위 밖 - 나중에 별도로 추가.
     const LUCKY_COIN_PRICE = 5000;
+    // 💡 추가: ASMR 칩 셔플 가격. 럭키 코인과 같은 "기본 피젯" 티어라 동일하게 책정.
+    const CHIP_SHUFFLE_PRICE = 5000;
 
-    // 💡 수정: 럭키 코인 토스는 실제 구매 가능해졌으므로 제거. 나머지 3개는 여전히 개발중.
+    // 💡 수정: 럭키 코인 토스, ASMR 칩 셔플은 실제 구매 가능해졌으므로 제거. 나머지 2개는 여전히 개발중.
     const DEV_SHOP_ITEMS = [
-      { icon: "🃏", name: "ASMR 칩 셔플", desc: "클릭하면 칩이 촤르륵 갈라졌다 합쳐지는 피젯" },
       { icon: "🍅", name: "분노의 투척 아이템", desc: "AI에게 토마토·달걀 등을 던지는 틸트 관리 아이템" },
       { icon: "🎨", name: "VIP 테이블 펠트 & 네임플레이트", desc: "테이블 색상과 좌석 테두리를 바꾸는 스킨" },
     ];
@@ -124,10 +205,11 @@
             bankroll: typeof parsed.bankroll === "number" && isFinite(parsed.bankroll) ? parsed.bankroll : DEFAULT_BANKROLL,
             ownsChartSheet: !!parsed.ownsChartSheet,
             ownsLuckyCoin: !!parsed.ownsLuckyCoin, // 💡 추가: 럭키 코인 토스 구매 여부
+            ownsChipShuffle: !!parsed.ownsChipShuffle, // 💡 추가: ASMR 칩 셔플 구매 여부
           };
         }
       } catch (e) { /* localStorage 접근 불가 등 - 기본값으로 폴백 */ }
-      return { bankroll: DEFAULT_BANKROLL, ownsChartSheet: false, ownsLuckyCoin: false };
+      return { bankroll: DEFAULT_BANKROLL, ownsChartSheet: false, ownsLuckyCoin: false, ownsChipShuffle: false };
     }
 
     function saveMeta(meta) {
@@ -1362,7 +1444,7 @@
         if (isFlipping) return;
         setIsFlipping(true);
 
-        // 💡 동전 전용 사운드(coin.mp3)가 아직 없어서 기존 베팅 사운드를 임시로 차용
+        // 💡 수정: 전용 코인 사운드(coin.mp3)가 추가되어 더 이상 베팅 사운드를 빌려쓰지 않음
         playSound('coin', false, isMutedSfx);
 
         // 랜덤 앞/뒷면 결정 (true: 앞면(♠), false: 뒷면(★))
@@ -1420,6 +1502,7 @@
       },
       shadow: {
         position: "absolute", bottom: -6, left: "50%",
+        transform: "translateX(-50%)", // 💡 수정: idle 상태(애니메이션 없음)에서도 중앙 정렬되도록 기본값에 추가
         width: 30, height: 8, background: "rgba(0,0,0,0.8)",
         borderRadius: "50%", filter: "blur(2px)",
       },
@@ -1447,6 +1530,56 @@
         width: "65%", height: "65%", borderRadius: "50%",
         border: "1px dashed rgba(255,255,255,0.3)",
         display: "flex", alignItems: "center", justifyContent: "center"
+      }
+    };
+
+    // 🃏 ASMR 칩 셔플 피젯 컴포넌트
+    function ChipShuffleFidget({ isMutedSfx }) {
+      const [isShuffling, setIsShuffling] = useState(false);
+
+      const doShuffle = () => {
+        if (isShuffling) return;
+        setIsShuffling(true);
+
+        playSound('chip_ASMR', false, isMutedSfx);
+
+        // 💡 늘어난 애니메이션 지속 시간(1.2초)에 맞춰 상태 초기화 연장
+        setTimeout(() => setIsShuffling(false), 1200);
+      };
+
+      return (
+        <div style={chipFidgetStyles.container} onClick={doShuffle} title="ASMR 칩 셔플 (클릭)">
+          <div style={chipFidgetStyles.shadow} className={isShuffling ? "shadow-pulse-flat" : ""} />
+
+          {/* 스택 순서(아래→위) = 놓인 순서: 왼쪽1 → 오른쪽1 → 왼쪽2 → 오른쪽2 → 왼쪽3 → 오른쪽3 */}
+          <div className={isShuffling ? "shuffle-l1" : ""} style={{ ...chipFidgetStyles.chip, bottom: 0, zIndex: 1 }} />
+          <div className={isShuffling ? "shuffle-r1" : ""} style={{ ...chipFidgetStyles.chip, bottom: 6, zIndex: 2 }} />
+          <div className={isShuffling ? "shuffle-l2" : ""} style={{ ...chipFidgetStyles.chip, bottom: 12, zIndex: 3 }} />
+          <div className={isShuffling ? "shuffle-r2" : ""} style={{ ...chipFidgetStyles.chip, bottom: 18, zIndex: 4 }} />
+          <div className={isShuffling ? "shuffle-l3" : ""} style={{ ...chipFidgetStyles.chip, bottom: 24, zIndex: 5 }} />
+          <div className={isShuffling ? "shuffle-r3" : ""} style={{ ...chipFidgetStyles.chip, bottom: 30, zIndex: 6 }} />
+        </div>
+      );
+    }
+
+    const chipFidgetStyles = {
+      container: {
+        position: "relative", width: 90, height: 42, cursor: "pointer",
+        marginTop: 6 // 동전과 높이를 맞추기 위한 여백
+      },
+      shadow: {
+        position: "absolute", bottom: -4, left: "50%", transform: "translateX(-50%)",
+        width: 38, height: 6, background: "rgba(0,0,0,0.8)", borderRadius: "50%", filter: "blur(2px)",
+      },
+      chip: {
+        position: "absolute", left: 27, width: 36, height: 6,
+        borderRadius: "1px", // 정확한 직사각형이 되도록 모서리는 거의 각지게
+        background: "#1E1E1E",
+        borderTop: "1px solid rgba(255,255,255,0.2)", // 빛을 받는 상단 하이라이트
+        borderBottom: "1px solid #000",
+        // 측면 패턴
+        backgroundImage: "linear-gradient(90deg, #111 20%, #C9A44C 20%, #C9A44C 30%, #111 30%, #111 70%, #C9A44C 70%, #C9A44C 80%, #111 80%)",
+        boxSizing: "border-box"
       }
     };
 
@@ -1572,7 +1705,7 @@
       // 포함해서 완전히 지운다(localStorage도 함께). 뱅크롤=0일 때만 뜨는 게 아니라 설정 화면에서 항상 접근 가능.
       const handleDevReset = () => {
         askConfirm("테스트용 전체 초기화 — 뱅크롤과 차트 시트 구매내역을 모두 지우고 처음 상태(뱅크롤 100,000, 미구매)로 되돌립니다. 계속할까요?", () => {
-          setMeta({ bankroll: DEFAULT_BANKROLL, ownsChartSheet: false, ownsLuckyCoin: false });
+          setMeta({ bankroll: DEFAULT_BANKROLL, ownsChartSheet: false, ownsLuckyCoin: false, ownsChipShuffle: false });
           setGame(initialGame());
           setBetAmount(initialGame().ante * 5);
           runningRef.current = false;
@@ -2240,6 +2373,15 @@
           });
         };
 
+        // 💡 추가: ASMR 칩 셔플 구매 로직 (동일한 패턴)
+        const canBuyChipShuffle = !meta.ownsChipShuffle && meta.bankroll >= CHIP_SHUFFLE_PRICE;
+        const buyChipShuffle = () => {
+          if (!canBuyChipShuffle) return;
+          askConfirm(`ASMR 칩 셔플을 ${CHIP_SHUFFLE_PRICE.toLocaleString()}에 구매하시겠습니까? (뱅크롤에서 차감, 영구 소유)`, () => {
+            setMeta(m => ({ ...m, bankroll: m.bankroll - CHIP_SHUFFLE_PRICE, ownsChipShuffle: true }));
+          });
+        };
+
         return (
           <div style={styles.page}>
             <div style={styles.feltGlow} />
@@ -2407,7 +2549,26 @@
                       )}
                     </div>
 
-                    {/* 개발중 아이템 3종 */}
+                    {/* 💡 추가: ASMR 칩 셔플 - 실제 구매 가능 */}
+                    <div style={styles.shopItem}>
+                      <div style={styles.shopItemInfo}>
+                        <div style={styles.shopItemName}>🃏 ASMR 칩 셔플</div>
+                        <div style={styles.shopItemDesc}>클릭하면 칩 4개가 좌우로 갈라졌다 다시 합쳐지는 피젯. 판단에는 영향이 없어요.</div>
+                      </div>
+                      {meta.ownsChipShuffle ? (
+                        <div style={styles.shopOwnedTag}>✅ 보유중</div>
+                      ) : (
+                        <button
+                          style={{ ...styles.shopBuyBtn, ...(canBuyChipShuffle ? {} : styles.buyInPresetBtnDisabled) }}
+                          disabled={!canBuyChipShuffle}
+                          onClick={buyChipShuffle}
+                        >
+                          {CHIP_SHUFFLE_PRICE.toLocaleString()}
+                        </button>
+                      )}
+                    </div>
+
+                    {/* 개발중 아이템 2종 */}
                     {DEV_SHOP_ITEMS.map(item => (
                       <div key={item.name} style={{ ...styles.shopItem, ...styles.shopItemDisabled }}>
                         <div style={styles.shopItemInfo}>
@@ -2577,12 +2738,13 @@
                         );
                       })()}
 
-                      {/* 💡 추가: 구매한 피젯 아이템들이 유저 박스 오른쪽에 나열됨 (지금은 럭키 코인 하나뿐이지만
-                          앞으로 늘어날 걸 감안해 목록형 컨테이너로 구성. 아직 '챙겨갈 아이템 선택' 기능은 없어서
-                          보유한 아이템은 항상 전부 표시됨) */}
-                      {meta.ownsLuckyCoin && (
+                      {/* 💡 수정: 구매한 피젯 아이템들이 유저 박스 오른쪽에 나열됨 (럭키 코인 + 칩 셔플).
+                          앞으로 더 늘어날 걸 감안해 목록형 컨테이너로 구성. 아직 '챙겨갈 아이템 선택' 기능은
+                          없어서 보유한 아이템은 항상 전부 표시됨 */}
+                      {(meta.ownsLuckyCoin || meta.ownsChipShuffle) && (
                         <div style={styles.fidgetItemsRow}>
-                          <LuckyCoin isMutedSfx={isMutedSfx} />
+                          {meta.ownsLuckyCoin && <LuckyCoin isMutedSfx={isMutedSfx} />}
+                          {meta.ownsChipShuffle && <ChipShuffleFidget isMutedSfx={isMutedSfx} />}
                         </div>
                       )}
                     </div>
