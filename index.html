@@ -1324,7 +1324,11 @@
               return { type: "fold" };
             }
             if (isWeak && toCall === 0 && Math.random() < bluffProb(0.60)) return { type: "bet", amount: calculateThinBet(0.5, 0.8) };
-            if (isWeak && toCall > 0 && Math.random() < 0.20 * exploitMultiplier) return { type: "bet", amount: calculateThinBet(0.5, 0.8) }; 
+            // 💡 버그 수정: 여기서만 exploitMultiplier 하나만 곱하고 bluffProb()를 거치지 않아서
+            // blockerBoost/positionBoost/tableSizeBoost는 물론 새로 추가한 raiseWarPenalty(레이즈 전쟁
+            // 억제)까지 전부 빠져있었다. bluffProb(0.20)으로 통일해서 다른 블러핑 판단과 동일하게
+            // 모든 배수가 일관되게 적용되도록 함.
+            if (isWeak && toCall > 0 && Math.random() < bluffProb(0.20)) return { type: "bet", amount: calculateThinBet(0.5, 0.8) };
             if (toCall > 0 && potOdds < 0.35) return { type: "call" }; 
             if (toCall > 0) return { type: "fold" };
             return { type: "check" };
