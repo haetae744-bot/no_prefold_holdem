@@ -977,7 +977,7 @@
       const phaseNames = { preflop: "프리플랍", flop: "플랍", turn: "턴", river: "리버" };
 
       actions.forEach((act, idx) => {
-        const { phase, type, investedAmount, isAllIn, ev, drawInfo, pot, toCall, opponentsCount, hole, community, spr, positionTier, positionLabel, remainingPlayers } = act;
+        const { phase, type, investedAmount, isAllIn, ev, drawInfo, pot, toCall, opponentsCount, hole, community, spr, positionTier, positionLabel, remainingPlayers, raiseCount, actorsRemainingAfterMe } = act;
         let score = 70;
         let comment = "판단 보류 (정보 부족)";
 
@@ -989,28 +989,59 @@
         if (phase === "preflop") {
           const chenScore = evaluatePreflop(hole);
           const posLabel = positionLabel || "";
+          const raiseCountAtAction = raiseCount || 0;
+          const isThreeBetSituation = raiseCountAtAction >= 1; // 💡 이미 레이즈가 있었던 상황(3벳/4벳)인지
           let pfScore = 70;
           let pfComment = "";
 
+          // 💡 추가: decideAI의 프리플랍 판단(성향 보정 없는 중립 기준)을 재현해서 '추천 액션'을
+          // 계산한다. 기존엔 recommended를 항상 빈 문자열로 하드코딩해놔서 추천 액션이 아예 안 뜨고
+          // 있었다. 포지션 보정은 decideAI와 동일한 계단형 커브를 그대로 사용.
+          const remaining = actorsRemainingAfterMe || 0;
+          let posAdj;
+          if (remaining >= 5) posAdj = 1.5;
+          else if (remaining === 4) posAdj = 0.8;
+          else if (remaining === 3) posAdj = 0.3;
+          else posAdj = -1.3;
+          const openTh = 6 + posAdj;
+          const defendTh = 6 + posAdj;
+          const threeBetTh = 11;
+
+          let recommended;
+          let recommendedType;
+          if (raiseCountAtAction === 0) {
+            if (chenScore >= openTh) { recommended = "오픈 레이즈"; recommendedType = "bet"; }
+            else { recommended = "폴드 (또는 상황에 따라 림프)"; recommendedType = "fold"; }
+          } else if (chenScore >= threeBetTh) { recommended = "재레이즈 (3벳)"; recommendedType = "bet"; }
+          else if (chenScore >= defendTh) { recommended = "콜"; recommendedType = "call"; }
+          else { recommended = "폴드"; recommendedType = "fold"; }
+
           if (type === "bet") {
-            if (chenScore >= 10) { pfScore = 95; pfComment = `전투력 ${chenScore}점의 확실히 좋은 패로 ${posLabel}에서 레이즈했습니다. 정석적인 오픈입니다.`; }
+            // 💡 버그 수정: raiseCount를 기록하지 않아서 3벳을 해도 항상 '오픈'으로만 코멘트가 나가고
+            // 있었다. 레이즈 시점에 이미 레이즈가 있었는지(raiseCountAtAction)로 3벳/4벳을 구분한다.
+            if (isThreeBetSituation) {
+              if (chenScore >= 11) { pfScore = 95; pfComment = `전투력 ${chenScore}점의 프리미엄 패로 재레이즈(3벳)했습니다. 밸류로 훌륭한 선택입니다.`; }
+              else if (chenScore >= 5) { pfScore = 68; pfComment = `전투력 ${chenScore}점으로 재레이즈(3벳)했습니다. 밸류로 보기엔 다소 얇지만, 가끔 섞는 블러프성 재레이즈로는 나쁘지 않은 시도입니다.`; }
+              else { pfScore = 30; pfComment = `전투력 ${chenScore}점의 약한 패로 재레이즈(3벳)했습니다. 상대가 이미 레이즈한 상황이라 리스크가 더 큽니다.`; }
+            } else if (chenScore >= 10) { pfScore = 95; pfComment = `전투력 ${chenScore}점의 확실히 좋은 패로 ${posLabel}에서 오픈 레이즈했습니다. 정석적인 오픈입니다.`; }
             else if (chenScore >= 7) {
               if (positionTier === "late") { pfScore = 88; pfComment = `전투력 ${chenScore}점은 애매하지만, 레이트 포지션의 이점을 살려 넓은 레인지로 오픈한 좋은 시도입니다.`; }
               else if (positionTier === "early") { pfScore = 55; pfComment = `전투력 ${chenScore}점 정도로 얼리 포지션에서 오픈하기엔 다소 무리가 있습니다. 뒤에 남은 인원이 많다는 걸 감안해야 합니다.`; }
               else { pfScore = 80; pfComment = `전투력 ${chenScore}점으로 무난한 오픈입니다.`; }
             } else {
-              pfScore = 35; pfComment = `전투력 ${chenScore}점의 약한 패로 레이즈했습니다. 포지션과 무관하게 장기적으로 손해보기 쉬운 시도입니다.`;
+              pfScore = 35; pfComment = `전투력 ${chenScore}점의 약한 패로 오픈 레이즈했습니다. 포지션과 무관하게 장기적으로 손해보기 쉬운 시도입니다.`;
             }
           } else if (type === "call") {
-            if (chenScore >= 8) { pfScore = 85; pfComment = `전투력 ${chenScore}점의 준수한 패로 콜하며 판을 지켜봤습니다.`; }
-            else { pfScore = 55; pfComment = `전투력 ${chenScore}점 정도의 애매한 패로 콜했습니다. 확실한 이유가 없다면 폴드도 고려할 만합니다.`; }
+            const callLabel = isThreeBetSituation ? "레이즈에 콜하며 방어" : "림프(콜)";
+            if (chenScore >= 8) { pfScore = 85; pfComment = `전투력 ${chenScore}점의 준수한 패로 ${callLabel}했습니다.`; }
+            else { pfScore = 55; pfComment = `전투력 ${chenScore}점 정도의 애매한 패로 ${callLabel}했습니다. 확실한 이유가 없다면 폴드도 고려할 만합니다.`; }
           } else {
             if (chenScore < 7) { pfScore = 90; pfComment = `전투력 ${chenScore}점의 약한 패를 무리하지 않고 접었습니다. 기본에 충실한 판단입니다.`; }
             else { pfScore = 60; pfComment = `전투력 ${chenScore}점이면 상황에 따라 플레이해볼 만한 패였는데 접었습니다.`; }
           }
 
           totalScore += pfScore;
-          phaseResults.push({ phase: phaseNames[phase] || phase, score: pfScore, comment: pfComment, recommended: "", type, recommendedType: null });
+          phaseResults.push({ phase: phaseNames[phase] || phase, score: pfScore, comment: pfComment, recommended, type, recommendedType });
           return; // 프리플랍 채점은 여기서 종료 - 아래 포스트플랍 전용 로직은 건너뜀
         }
 
@@ -1127,13 +1158,13 @@
               if (hasGoodDraw) {
                 if (betRatio >= 0.5 && betRatio <= 0.8) { score = 100; comment = `좋은 드로우를 바탕으로 팟의 50~80%를 때리는 아주 날카로운 세미-블러프입니다.`; }
                 else if (isAllIn && betRatio < 0.5) { score = 95; comment = `스택이 짧아 정석 사이즈(50~80%)에는 못 미쳤지만, ${drawType}을 살려 가진 칩을 전부 투입한 좋은 올인입니다.`; }
-                else { score = 90; comment = `${drawType}을 활용한 세미-블러프는 좋았으나, 베팅 사이즈가 정석 범위(50~80%)를 벗어났습니다.`; }
+                else { score = 72; comment = `${drawType}을 활용한 세미-블러프 발상은 좋았으나, 베팅 사이즈가 정석 범위(50~80%)를 벗어났습니다.`; }
               }
               // 💡 [수정됨] 아웃츠 4~7개(빵꾸 등)를 '아웃츠 없는 퓨어 블러핑'에서 구출하여 세미 블러프로 고평가
               else if (outs >= 4) {
                 if (betRatio >= 0.4 && betRatio <= 0.8) { score = 95; comment = `${drawType} 가능성을 활용한 찌르기(세미 블러프)입니다. 공격적인 정석 플레이입니다.`; }
                 else if (isAllIn && betRatio < 0.4) { score = 90; comment = `스택이 짧아 정석 사이즈(40~80%)에는 못 미쳤지만, ${drawType} 가능성을 살려 가진 칩을 전부 투입한 판단입니다.`; }
-                else { score = 85; comment = `${drawType} 상태에서 베팅을 시도했으나, 상대방에게 압박을 주기엔 사이즈가 다소 아쉽습니다.`; }
+                else { score = 70; comment = `${drawType} 상태에서 베팅을 시도한 발상은 좋았으나, 상대방에게 압박을 주기엔 사이즈가 다소 아쉽습니다.`; }
               }
               // 💡 추가: 발전 가능성(아웃츠)은 없어도 상대의 너트급 조합을 블로킹하고 있다면 근거 있는 블러핑
               else if (hasKeyBlocker) {
@@ -1150,7 +1181,7 @@
               else {
                 if (betRatio >= 0.5 && betRatio <= 0.8) { score = 95; comment = "1:1 상황에서 타이밍을 뺏는 과감하고 정교한 블러핑입니다."; }
                 else if (isAllIn && betRatio < 0.5) { score = 85; comment = "스택이 짧아 정석 사이즈에는 못 미쳤지만, 가진 칩을 모두 던진 올인 블러핑 시도입니다."; }
-                else { score = 80; comment = "블러핑을 시도했으나 사이즈가 정석(팟의 50~80%)을 벗어났습니다. 상대가 의도를 눈치챌 수 있습니다."; }
+                else { score = 68; comment = "블러핑 발상 자체는 좋았으나 사이즈가 정석(팟의 50~80%)을 벗어났습니다. 상대가 의도를 눈치챌 수 있습니다."; }
               }
             }
           }
@@ -2300,7 +2331,11 @@
               spr: sprInfo.spr,
               positionTier: positionInfo.tier,
               positionLabel: positionInfo.label,
-              remainingPlayers: remainingPlayersCount
+              remainingPlayers: remainingPlayersCount,
+              // 💡 추가: 이 액션 시점의 레이즈 누적 횟수 - 프리플랍 피드백에서 오픈과 3벳/4벳을
+              // 구분하는 데 필요하다(기존엔 이 값이 없어서 항상 '오픈'으로만 취급되고 있었다).
+              raiseCount: s.raiseCountThisStreet || 0,
+              actorsRemainingAfterMe: positionInfo.actorsRemainingAfterMe
             });
 
             // 💡 추가: 유저의 전체 액션 횟수와 공격적 액션(베팅/레이즈) 카운트
@@ -2907,7 +2942,9 @@
                         <div style={styles.buyInSubNote}>🔒 뱅크롤 {currentThreshold.toLocaleString()} 이상 필요</div>
                       ) : effectiveBuyIn < currentPreset ? (
                         <div style={styles.buyInSubNote}>보유 뱅크롤이 부족해 실제로는 {effectiveBuyIn.toLocaleString()}으로 시작</div>
-                      ) : null}
+                      ) : (
+                        <div style={styles.buyInSubNote}>해금됨: 뱅크롤 {currentThreshold.toLocaleString()} 이상 필요</div>
+                      )}
                     </div>
                     <button
                       style={styles.aiStepBtn}
