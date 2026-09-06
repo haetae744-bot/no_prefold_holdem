@@ -1320,7 +1320,7 @@
     }
 
 
-    function decideAI(ev, toCall, chips, pot, aiType, drawInfo, hole, community, bb, streetStartPot, opponentsCount, opponentProfile, spr, positionTier, positionLabel, remainingPlayers, raiseCount = 0, actorsRemainingAfterMe = 0) {
+    function decideAI(ev, toCall, chips, pot, aiType, drawInfo, hole, community, bb, streetStartPot, opponentsCount, opponentProfile, spr, positionTier, positionLabel, remainingPlayers, raiseCount = 0, actorsRemainingAfterMe = 0, isPreflopAggressor = false) {
       // 💡 추가: 프리플랍(커뮤니티 카드 0장) 전용 분기. 포스트플랍 판단 장치(SPR 커밋, 보드 위협도,
       // 탑페어/투페어 비교 등)는 전부 보드가 있다는 걸 전제로 하므로 여기서는 전부 건너뛰고,
       // 첸 포뮬러(evaluatePreflop) 점수 하나로 오픈레이즈/콜/폴드를 판단한다. 레인지 차트(포지션×성향별
@@ -1328,11 +1328,18 @@
       if (community.length === 0) {
         const chenScore = evaluatePreflop(hole);
 
-        // 💡 수정: 얼리/미들/레이트 3단계 근사치 대신, 내 뒤에 실제로 액션할 사람이 몇 명 남았는지
-        // (actorsRemainingAfterMe)를 직접 반영한다. 뒤에 남은 사람이 많을수록(=먼저 액션하는 얼리
-        // 포지션일수록) 조금이라도 더 타이트하게, 적을수록(레이트) 조금이라도 더 루즈하게 - 3단계로
-        // 뭉뚱그리지 않고 인원수에 비례해서 매끄럽게 조정된다.
-        const positionAdjust = actorsRemainingAfterMe * 0.6;
+        // 💡 수정: 기존엔 선형 보정(actorsRemainingAfterMe*0.6) 위에 레이트 포지션만 별도 보너스를
+        // 덧붙이는 식이었는데, 실제 솔버 기반 오픈 레인지 데이터(UTG 약 15%, 컷오프 약 25%,
+        // 버튼/스몰블라인드는 폴드가 넘어왔을 때 40~50%까지)를 찾아서 대조해보니 얼리~미들 구간이
+        // 여전히 그 데이터보다 타이트했다. 그래서 선형 보정과 스틸 보너스를 하나의 계단형 커브로
+        // 통합하고, 각 구간이 실제 데이터에 더 가깝게 떨어지도록 다시 맞췄다(첸 스코어 상위%
+        // 환산 기준: UTG≈7점/상위17.8%, 미들≈6.5점, 컷오프≈6점/상위25.5%, 버튼·SB≈4점/상위51.7%).
+        let positionAdjust;
+        if (actorsRemainingAfterMe >= 5) positionAdjust = 1.5;       // UTG급
+        else if (actorsRemainingAfterMe === 4) positionAdjust = 0.8; // 미들급
+        else if (actorsRemainingAfterMe === 3) positionAdjust = 0.3;   // 컷오프급
+        else positionAdjust = -1.3;                                    // 버튼/SB급(2명 이하 남음) - 스틸 존
+
         // 성향 보정: Maniac은 훨씬 루즈하게, Rock은 훨씬 타이트하게, Station은 콜은 많이 하지만
         // 레이즈 기준 자체는 크게 안 낮춤(레이즈보다 콜을 선호하는 성향이라 별도 처리)
         let personalityAdjust = 0;
@@ -1362,13 +1369,55 @@
           // 아직 아무도 레이즈하지 않음(블라인드만 걸려있음) - 오픈할지 결정
           if (chenScore >= openThreshold) return { type: "bet", amount: Math.min(openRaiseAmount, chips) };
           if (toCall === 0) return { type: "check" }; // 콜할 것도 없이 내 차례 옵션(빅블라인드 옵션 등)
-          // 💡 수정: Station은 프리플랍에서도 호기심에 작은 사이즈는 더 자주 받아본다(35%→50%)
-          if (aiType === "Station" && toCall <= bb && Math.random() < 0.50) return { type: "call" };
+          // 💡 버그 수정: 기존엔 Station만 오픈 기준 미달 시 콜(림프)이 가능하고 나머지 성향은
+          // 무조건 폴드였다. 그 결과 첫 오픈이 나오기도 전에 대부분 이미 폴드해버려서, 실제로 3000핸드
+          // 시뮬레이션 돌려보니 핸드의 51.7%가 플랍까지도 못 가고 끝나버리는 심각한 문제가 있었다
+          // (포스트플랍 훈련이 목적인 앱인데 정작 플랍을 절반 넘게 못 보는 셈). 오픈 기준보다 살짝
+          // 낮은 스펙큘레이티브 구간(림프 기준)에서는 전 성향이 일정 확률로 저렴하게 림프할 수 있게
+          // 확장했다 - 성향별로 림프 성향 자체는 다르게 유지(Rock은 여전히 신중, Station이 제일 자주).
+          const limpThreshold = openThreshold - 6;
+          const limpChance = aiType === "Rock" ? 0.20 : aiType === "Maniac" ? 0.35 : aiType === "Station" ? 0.60 : 0.45; // TAG 기본 45%
+          if (chenScore >= limpThreshold && toCall <= bb * 2 && Math.random() < limpChance) return { type: "call" };
           return { type: "fold" };
         }
 
-        // 누군가 이미 레이즈한 상황(3벳 이상) - 프리미엄이 아니면 쉽게 접는다
-        if (chenScore >= defendThreshold) return { type: "call" };
+        // 💡 추가: 누군가 이미 레이즈한 상황에서 콜/폴드만 하던 것을, 프리미엄 패면 재레이즈(3벳/4벳)도
+        // 가능하도록 확장. 첸 스코어 상위 2~4%대(성향별 보정)를 재레이즈 기준으로 삼는다 - 방어(콜)
+        // 기준보다 훨씬 좁아서, "콜할 만한 패"와 "재레이즈할 만큼 강한 패"가 구분된다.
+        const threeBetThreshold = 11 + Math.floor(personalityAdjust / 2);
+        // 레이즈 전쟁 억제: 레이즈가 계속 오갈수록(raiseCount 누적) 재레이즈 확률을 점점 낮춘다.
+        const reRaiseChance = Math.max(0.15, 1 - Math.max(0, raiseCount - 1) * 0.4);
+        // 재레이즈 사이즈: 상대가 낸 금액(toCall)의 약 3배를 목표 총액으로 - 표준적인 3벳 사이즈 관례.
+        // 여기서도 amount는 'toCall 위에 얹는 증분'이므로, 목표 총액에서 toCall을 뺀 만큼만 넘긴다.
+        const desiredThreeBetTotal = Math.max(toCall + bb * 2, Math.round((toCall * 3) / roundingUnitForBB(bb)) * roundingUnitForBB(bb));
+        const threeBetAmount = Math.max(0, desiredThreeBetTotal - toCall);
+
+        if (chenScore >= threeBetThreshold && Math.random() < reRaiseChance) {
+          return { type: "bet", amount: threeBetAmount };
+        }
+        // 💡 추가: 가끔 블러프성 재레이즈도 섞는다(주로 Maniac) - 매번 프리미엄에만 재레이즈하면
+        // "재레이즈 = 무조건 초강패"라는 패턴이 너무 뻔해져서 상대(유저)가 쉽게 읽어버린다.
+        if (aiType === "Maniac" && raiseCount === 1 && chenScore < threeBetThreshold && chenScore >= 5 && Math.random() < 0.15) {
+          return { type: "bet", amount: threeBetAmount };
+        }
+
+        // 💡 추가: 팟오즈 완화 - 레이즈가 팟 대비 작을수록(이미 판에 죽은 돈이 쌓여있어서 콜에 필요한
+        // 비율이 낮을수록) 방어 기준을 낮춰준다. 고정된 defendThreshold만 쓰면, 이미 여러 명이 림프해서
+        // 판돈이 쌓인 뒤에 나온 저렴한 레이즈에도 무조건 defendThreshold를 요구하게 되어, 실제로는
+        // 콜이 이득인 상황에서도 과도하게 접어버리는 문제가 있었다(정확한 큐 재현 시뮬레이션에서 워크
+        // 비율이 46.7%까지 나온 주된 원인). 팟오즈가 좋을수록(레이즈가 상대적으로 작을수록) 기준을
+        // 최대 4점까지 낮춰서, "이미 죽은 돈이 많은 저렴한 레이즈"는 더 널널하게 방어할 수 있게 한다.
+        const raisePotOdds = pot > 0 ? toCall / (pot + toCall) : 1;
+        const potOddsRelief = Math.max(0, Math.min(4, (0.35 - raisePotOdds) * 12));
+        // 💡 추가: 빅블라인드 방어 특혜. 프리플랍에서 레이즈에 대응하는 상황(raiseCount>=1)에
+        // actorsRemainingAfterMe===0(내 뒤에 더 액션할 사람이 없음)이면, 이 게임의 프리플랍 액션
+        // 순서(UTG→...→BTN→SB→BB) 구조상 곧 빅블라인드라는 뜻이다. 빅블라인드는 이미 1BB를 낸
+        // 상태라 실질 콜 비용이 더 작고(팟오즈 완화로 이미 일부 반영됨), 무엇보다 뒤에 재레이즈로
+        // 스퀴즈당할 위험이 0이다(액션이 나로 끝남) - 이건 팟오즈와 별개의 요인이라 추가로 반영한다.
+        const bbDefenseBonus = (community.length === 0 && raiseCount >= 1 && actorsRemainingAfterMe === 0) ? 2.5 : 0;
+        const effectiveDefendThreshold = defendThreshold - potOddsRelief - bbDefenseBonus;
+
+        if (chenScore >= effectiveDefendThreshold) return { type: "call" };
         if (toCall === 0) return { type: "check" };
         return { type: "fold" };
       }
@@ -1553,23 +1602,37 @@
       // 🌱 [플랍 / 턴(Flop/Turn) 전용 AI 판단 로직] 🌱
       // --------------------------------------------------
 
+      // 💡 추가: C-Bet(연속 베팅) 인지 - 내가 프리플랍의 마지막 레이저(공격 주도권자)였고, 지금이
+      // 정확히 플랍(3장)이며, 아직 아무도 베팅하지 않은 상황(내가 먼저 칠 기회가 있는 상황)일 때만
+      // 성립한다. 실제 포커에서 프리플랍 레이저는 패가 안 맞아도 "일단 한 번 더 찔러본다"는 개념으로
+      // 상당히 높은 빈도로 플랍 베팅을 이어가는데, 지금까지는 이걸 완전히 무시하고 매 스트리트를
+      // 독립적으로(패 강도만 보고) 판단하고 있었다.
+      const isCbetSpot = isPreflopAggressor && community.length === 3 && toCall === 0;
+
       if (isTotalAir && toCall > 0 && Math.random() < 0.90) {
         return { type: "fold" };
       }
 
       switch (aiType) {
-        case "Maniac":
+        case "Maniac": {
           if (isStrong) return decideStrongAction();
-          if (Math.random() < bluffProb(getNoisyThreshold(0.40, 0.15))) return { type: "bet", amount: calculateThinBet(0.5, 0.8) };
+          // 💡 수정: C-Bet 스팟이면 원래도 높은 블러프 빈도(40%)를 75%까지 끌어올림
+          const maniacBluffRate = isCbetSpot ? 0.75 : getNoisyThreshold(0.40, 0.15);
+          if (Math.random() < bluffProb(maniacBluffRate)) return { type: "bet", amount: calculateThinBet(0.5, 0.8) };
           if (toCall > 0 && (isModerate || drawInfo.hitChance >= potOdds - 0.10)) return { type: "call" };
           if (toCall > 0) return { type: "fold" };
           return { type: "check" };
+        }
 
         case "Rock":
           if (isStrong) {
             if (Math.random() < getNoisyThreshold(0.20, 0.10) && toCall === 0) return { type: "check" };
             return { type: "bet", amount: calculateBet() };
           }
+          // 💡 추가: Rock은 원래 약한 패로는 절대 안 베팅하는 성향이지만, 프리플랍에서 직접 레이즈해
+          // 놓고 플랍에서 완전히 손을 놓아버리는 것도 부자연스럽다. 다른 성향보다는 훨씬 낮은
+          // 빈도(35%)로만, C-Bet 스팟에 한해서 절제된 스탑 한 번을 시도한다.
+          if (isCbetSpot && Math.random() < 0.35) return { type: "bet", amount: calculateThinBet(0.4, 0.6) };
           if (isModerate && toCall > 0 && potOdds < (0.28 + bluffCatchBonus)) return { type: "call" };
           if (toCall > 0 && drawInfo.hitChance >= (potOdds - bluffCatchBonus)) return { type: "call" };
           if (toCall > 0) return { type: "fold" };
@@ -1585,17 +1648,21 @@
           return { type: "check" };
 
         case "TAG":
-        default:
+        default: {
           if (isStrong) return decideStrongAction();
           if (isModerate) {
             if (toCall === 0) return Math.random() < getNoisyThreshold(0.50, 0.10) ? { type: "bet", amount: calculateThinBet(0.3, 0.5) } : { type: "check" };
             if (toCall > 0 && potOdds < getNoisyThreshold(0.30 + bluffCatchBonus, 0.05)) return { type: "call" };
             return { type: "fold" };
           }
-          if (toCall === 0 && Math.random() < bluffProb(getNoisyThreshold(0.20, 0.05))) return { type: "bet", amount: calculateThinBet(0.4, 0.6) };
+          // 💡 수정: C-Bet 스팟이면 원래 블러프 빈도(20%)를 65%까지 끌어올림 - TAG가 대표적으로
+          // "정석적인 C-Bet"을 보여주기 가장 적합한 성향이라 여기서 효과가 가장 잘 드러난다.
+          const tagBluffRate = isCbetSpot ? 0.65 : getNoisyThreshold(0.20, 0.05);
+          if (toCall === 0 && Math.random() < bluffProb(tagBluffRate)) return { type: "bet", amount: calculateThinBet(0.4, 0.6) };
           if (toCall > 0 && drawInfo.hitChance >= (potOdds - bluffCatchBonus)) return { type: "call" };
           if (toCall > 0) return { type: "fold" };
           return { type: "check" };
+        }
       }
     }
 
@@ -1641,6 +1708,9 @@
         // 💡 추가: 딜러 버튼 위치(players 배열 인덱스). 매 핸드 시계방향(다음 인덱스)으로 이동.
         // 액션 순서를 이 위치 기준으로 동적으로 계산하는 데 쓰인다(고정 순서였던 것을 대체).
         buttonIndex: 0,
+        // 💡 추가: 프리플랍에서 마지막으로 레이즈한 사람(공격 주도권을 쥔 사람) 기록. 플랍에서
+        // C-Bet(연속 베팅) 빈도를 조정하는 데 쓰인다. 매 핸드 시작 시 null로 초기화됨.
+        preflopAggressor: null,
         // 💡 수정: 기본값을 5로 - 지금은 AI 인원수가 1/5/8 중 하나로 고정 선택되는데, 예전 자유선택
         // (1~8명) 시절 기본값(6)이 그대로 남아있었다. 6명 AI = 총 7인은 세 선택지 중 어디에도 없고,
         // 포지션 이름표(2/6/9인용 테이블)도 지원 안 하는 어중간한 인원수라 그대로 두면 안 됐다.
@@ -2075,6 +2145,10 @@
           if (s.roundBets[player] > s.currentBet) {
             s.currentBet = s.roundBets[player];
             raised = true;
+            // 💡 추가: 프리플랍에서 레이즈가 나오면 그 사람이 '공격 주도권'을 쥔 것으로 기록.
+            // 3벳/4벳처럼 레이즈가 여러 번 나오면 매번 갱신되어, 최종적으로 마지막에 레이즈한
+            // 사람이 어그레서가 된다(포커 용어상 '어그레서'는 항상 마지막 레이저를 가리킴).
+            if (s.phase === "preflop") s.preflopAggressor = player;
           }
           const label = toCall > 0 ? "레이즈" : "베팅";
           s.lastAction[player] = `${label} ${total}`;
@@ -2243,7 +2317,7 @@
             if (!gameStateRef.current.setupDone) return;
             // 💡 유저가 이번 핸드에 아직 살아있을 때만 '유저 프로필'을 반영 (이미 폴드했으면 반영할 대상이 없으므로 중립)
             const opponentProfile = (!s.folded.user && !s.eliminated.user) ? getOpponentProfile(s) : null;
-            action = decideAI(ev, toCall, s.chips[p], s.pot, s.aiPersonalities[p], drawInfo, s.hole[p], s.community, s.bb, s.streetStartPot, activeOpponentsCount, opponentProfile, sprInfo.spr, positionInfo.tier, positionInfo.label, remainingPlayersCount, s.raiseCountThisStreet || 0, positionInfo.actorsRemainingAfterMe);
+            action = decideAI(ev, toCall, s.chips[p], s.pot, s.aiPersonalities[p], drawInfo, s.hole[p], s.community, s.bb, s.streetStartPot, activeOpponentsCount, opponentProfile, sprInfo.spr, positionInfo.tier, positionInfo.label, remainingPlayersCount, s.raiseCountThisStreet || 0, positionInfo.actorsRemainingAfterMe, s.preflopAggressor === p);
             if (action.type === "bet" && s.chips[p] <= toCall) action = { type: "call" };
           }
 
@@ -2522,6 +2596,7 @@
         s.buttonIndex = (s.buttonIndex + 1) % s.players.length;
 
         s.handWinners = {}; // 💡 새로 추가: 매 핸드마다 승리 기록 초기화
+        s.preflopAggressor = null; // 💡 추가: 프리플랍 공격 주도권도 매 핸드 초기화
         const players = s.players;
         s.log = [...s.log];
         s.handNum += 1;
