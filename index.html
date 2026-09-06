@@ -994,9 +994,9 @@
           let pfScore = 70;
           let pfComment = "";
 
-          // 💡 추가: decideAI의 프리플랍 판단(성향 보정 없는 중립 기준)을 재현해서 '추천 액션'을
-          // 계산한다. 기존엔 recommended를 항상 빈 문자열로 하드코딩해놔서 추천 액션이 아예 안 뜨고
-          // 있었다. 포지션 보정은 decideAI와 동일한 계단형 커브를 그대로 사용.
+          // 💡 수정: 추천 액션 계산이 decideAI의 실제 판단(팟오즈 완화, BB 방어 특혜, 림프 기준)을
+          // 반영 안 하고 있어서, 실제로는 AI라면 콜했을 손인데 "폴드했어야죠"라고 잘못 추천하는
+          // 정확성 문제가 있었다. decideAI와 동일한 계산을 그대로 재현해서 일치시킨다.
           const remaining = actorsRemainingAfterMe || 0;
           let posAdj;
           if (remaining >= 5) posAdj = 1.5;
@@ -1004,17 +1004,26 @@
           else if (remaining === 3) posAdj = 0.3;
           else posAdj = -1.3;
           const openTh = 6 + posAdj;
-          const defendTh = 6 + posAdj;
+          const limpTh = openTh - 6; // decideAI와 동일한 림프 기준(오픈 기준보다 6점 낮음)
           const threeBetTh = 11;
+          // 💡 추가: decideAI와 동일하게 팟오즈 완화 + BB 방어 특혜를 반영한 실효 방어 기준.
+          // 스코어링에서도 재사용하기 위해 raiseCountAtAction 분기 밖으로 끌어올렸다.
+          const raisePotOddsPct = toCall > 0 && pot > 0 ? Math.round((toCall / (pot + toCall)) * 100) : 0;
+          const potOddsRelief = Math.max(0, Math.min(4, (0.35 - raisePotOddsPct / 100) * 12));
+          const bbDefenseBonus = remaining === 0 ? 2.5 : 0;
+          const effectiveDefendTh = openTh - potOddsRelief - bbDefenseBonus;
 
           let recommended;
           let recommendedType;
           if (raiseCountAtAction === 0) {
             if (chenScore >= openTh) { recommended = "오픈 레이즈"; recommendedType = "bet"; }
-            else { recommended = "폴드 (또는 상황에 따라 림프)"; recommendedType = "fold"; }
-          } else if (chenScore >= threeBetTh) { recommended = "재레이즈 (3벳)"; recommendedType = "bet"; }
-          else if (chenScore >= defendTh) { recommended = "콜"; recommendedType = "call"; }
-          else { recommended = "폴드"; recommendedType = "fold"; }
+            else if (chenScore >= limpTh && toCall <= 200) { recommended = "림프(콜)도 고려 가능"; recommendedType = "call"; }
+            else { recommended = "폴드"; recommendedType = "fold"; }
+          } else {
+            if (chenScore >= threeBetTh) { recommended = "재레이즈 (3벳)"; recommendedType = "bet"; }
+            else if (chenScore >= effectiveDefendTh) { recommended = "콜"; recommendedType = "call"; }
+            else { recommended = "폴드"; recommendedType = "fold"; }
+          }
 
           if (type === "bet") {
             // 💡 버그 수정: raiseCount를 기록하지 않아서 3벳을 해도 항상 '오픈'으로만 코멘트가 나가고
@@ -1032,12 +1041,22 @@
               pfScore = 35; pfComment = `전투력 ${chenScore}점의 약한 패로 오픈 레이즈했습니다. 포지션과 무관하게 장기적으로 손해보기 쉬운 시도입니다.`;
             }
           } else if (type === "call") {
-            const callLabel = isThreeBetSituation ? "레이즈에 콜하며 방어" : "림프(콜)";
-            if (chenScore >= 8) { pfScore = 85; pfComment = `전투력 ${chenScore}점의 준수한 패로 ${callLabel}했습니다.`; }
-            else { pfScore = 55; pfComment = `전투력 ${chenScore}점 정도의 애매한 패로 ${callLabel}했습니다. 확실한 이유가 없다면 폴드도 고려할 만합니다.`; }
+            if (isThreeBetSituation) {
+              // 💡 수정: 고정된 8점 대신 실효 방어 기준(팟오즈 완화 + BB 방어 특혜 반영)으로 채점하고,
+              // 팟오즈 %를 코멘트에 숫자로 명시해서 근거를 보여준다.
+              if (chenScore >= effectiveDefendTh) { pfScore = 85; pfComment = `전투력 ${chenScore}점, 팟오즈 ${raisePotOddsPct}% - 레이즈에 콜하며 방어할 근거가 있는 패입니다.`; }
+              else { pfScore = 55; pfComment = `전투력 ${chenScore}점, 팟오즈 ${raisePotOddsPct}% - 방어 기준에는 못 미치는 패로 콜했습니다. 확실한 이유가 없다면 폴드도 고려할 만합니다.`; }
+            } else {
+              if (chenScore >= limpTh) { pfScore = 80; pfComment = `전투력 ${chenScore}점의 패로 저렴하게 림프(콜)했습니다.`; }
+              else { pfScore = 55; pfComment = `전투력 ${chenScore}점 정도의 애매한 패로 림프(콜)했습니다. 확실한 이유가 없다면 폴드도 고려할 만합니다.`; }
+            }
           } else {
-            if (chenScore < 7) { pfScore = 90; pfComment = `전투력 ${chenScore}점의 약한 패를 무리하지 않고 접었습니다. 기본에 충실한 판단입니다.`; }
-            else { pfScore = 60; pfComment = `전투력 ${chenScore}점이면 상황에 따라 플레이해볼 만한 패였는데 접었습니다.`; }
+            // 💡 수정: 레이즈에 대응하는 폴드라면 실효 방어 기준과 팟오즈 %를 근거로 보여준다.
+            if (isThreeBetSituation) {
+              if (chenScore < effectiveDefendTh) { pfScore = 90; pfComment = `전투력 ${chenScore}점, 팟오즈 ${raisePotOddsPct}% - 방어 기준에 못 미치는 패를 무리하지 않고 접었습니다.`; }
+              else { pfScore = 55; pfComment = `전투력 ${chenScore}점, 팟오즈 ${raisePotOddsPct}% - 방어할 근거가 있었는데 접었습니다.`; }
+            } else if (chenScore < openTh) { pfScore = 90; pfComment = `전투력 ${chenScore}점의 약한 패를 무리하지 않고 접었습니다. 기본에 충실한 판단입니다.`; }
+            else { pfScore = 60; pfComment = `전투력 ${chenScore}점이면 오픈해볼 만한 패였는데 접었습니다.`; }
           }
 
           totalScore += pfScore;
