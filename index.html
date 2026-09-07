@@ -445,6 +445,19 @@
       return 100;
     }
 
+    // 💡 추가: 프리플랍 기준값 근처에서 확률적으로 섞어주는 헬퍼. 실전 강자는 레인지 경계 근처의
+    // 패를 항상 똑같이 치지 않고 밸런스를 위해 확률적으로 섞는데(GTO 믹스 전략), 지금까지는
+    // chenScore가 기준값을 넘기만 하면 100% 확정적으로 갈려서 유저가 "이 AI는 정확히 몇 점부터
+    // 무조건 이렇게 친다"를 완벽하게 외울 수 있었다. 기준값 좌우 mixWidth 구간에서는 점수 차이에
+    // 비례한 확률로 판정하고, 그 구간 밖(확실히 위/아래)에서는 기존처럼 확정적으로 판정한다.
+    function mixedThresholdCheck(score, threshold, mixWidth = 1.5) {
+      const diff = score - threshold;
+      if (diff >= mixWidth) return true;
+      if (diff <= -mixWidth) return false;
+      const prob = (diff + mixWidth) / (2 * mixWidth);
+      return Math.random() < prob;
+    }
+
     // 💡 추가: 스트레이트/플러시를 제외한, 랭크 카운트만으로 판정 가능한 족보 카테고리 계산.
     // evaluateBest/evaluate5를 5장 미만 카드에 쓰면 isFlush 오탐(4장이 우연히 같은 무늬여도 flush로 오판)이
     // 발생할 수 있어, '보드 카드만으로 이 카테고리에 도달 가능한가'를 안전하게 확인하기 위해 별도로 둡니다.
@@ -911,6 +924,21 @@
       return Math.max(100, Math.floor(bb / 1000) * 100);
     }
 
+    // 💡 추가: 숫자를 한글 단위(만/억)로 표기하는 헬퍼. floor 미만은 기존 천단위 콤마 표기를 그대로
+    // 쓰고, floor 이상부터 만/억으로 변환한다. 이 앱에서 다루는 금액은 전부 BB나 바이인 프리셋의
+    // 배수라 만 단위로 깔끔하게 나뉘므로 나머지(끝수) 처리는 방어적으로만 넣어둔다.
+    function formatKoreanAmount(n, floor = 10000) {
+      if (n < floor) return n.toLocaleString();
+      if (n >= 100000000) {
+        const eok = Math.floor(n / 100000000);
+        const manRemainder = Math.floor((n % 100000000) / 10000);
+        return manRemainder > 0 ? `${eok.toLocaleString()}억 ${manRemainder.toLocaleString()}만` : `${eok.toLocaleString()}억`;
+      }
+      const man = Math.floor(n / 10000);
+      const rest = n % 10000;
+      return rest > 0 ? `${man.toLocaleString()}만 ${rest.toLocaleString()}` : `${man.toLocaleString()}만`;
+    }
+
     function calcMinOpeningBet(bb, streetStartPot) {
       const safePot = streetStartPot || 0; // 💡 방어 코드: 값이 없으면 0으로 계산하여 NaN 에러 방지
       const unit = roundingUnitForBB(bb);
@@ -929,6 +957,22 @@
       return Math.max(100, Math.min(maxBB, raw));
     }
 
+    // 💡 수정: 캐시게임은 이제 블라인드가 완전히 고정되어(다시는 안 오름) '다음 레벨'이라는 개념
+    // 자체가 없다. 그래서 토너먼트 모드일 때만 계산하고, 캐시게임이면 null을 반환한다. 토너먼트는
+    // 10핸드마다 무조건 상승하므로 다음 상승까지 남은 핸드 수를 그대로 계산한다. 이미 최고 레벨이어도
+    // null.
+    function getNextBlindLevelInfo(currentLevel, initialBB, tournamentMode, handNum) {
+      if (!tournamentMode) return null;
+      const lvl = currentLevel || 0;
+      if (lvl >= BLIND_LEVEL_MULTIPLIERS.length - 1) return null; // 이미 최고 레벨
+      const baseBB = initialBB || 100;
+      const nextBB = Math.max(100, Math.round(baseBB * BLIND_LEVEL_MULTIPLIERS[lvl + 1] / 100) * 100);
+      const nextSB = Math.max(50, Math.round((nextBB / 2) / 50) * 50);
+      const nextTriggerHand = (lvl + 1) * 10 + 1;
+      const handsUntilNext = Math.max(0, nextTriggerHand - (handNum || 1));
+      return { nextBB, nextSB, handsUntilNext };
+    }
+
     // 💡 추가: 주어진 칩 수량에 '비율(배수)'로 가장 가까운 바이인 프리셋을 찾는다.
     // 프리셋 간격이 1만→5만→10만→50만→100만처럼 등비적으로 벌어져 있으므로, 단순 차이(뺄셈)가 아니라
     // 로그 스케일 거리(비율)로 재야 직관과 맞는다 - 예: 25만은 차이로는 10만에 더 가깝지만(15만 vs 25만
@@ -945,6 +989,36 @@
         }
       });
       return best;
+    }
+
+    // 💡 추가: 스테이크(판돈) 규모를 0~1 사이 값으로 환산하는 공용 헬퍼. 로그 스케일로 재는 이유는
+    // 바이인 프리셋 자체가 1만→100만처럼 등비적으로 벌어져 있기 때문 - 단순 선형 비율로 재면 낮은
+    // 구간의 차이가 거의 안 느껴지고 높은 구간에서만 확 커진다. 성향 배정/상대 읽기 반응속도/믹싱 폭
+    // 전부 이 하나의 계수를 공유해서, "판이 커질수록 상대가 똑똑해진다"는 느낌을 일관되게 낸다.
+    function getStakesFactor(value, minVal, maxVal) {
+      if (!minVal || !maxVal || maxVal <= minVal) return 0;
+      return Math.max(0, Math.min(1, Math.log((value || minVal) / minVal) / Math.log(maxVal / minVal)));
+    }
+
+    // 💡 수정: 바이인 규모에 따라 AI 성향 분포를 다르게 배정. 실제 포커에서도 낮은 스테이크는 재미로
+    // 치는 루즈한 플레이어가 많고, 높은 스테이크로 갈수록 진지하게 계산하는 정석적인 플레이어 비중이
+    // 커지는 현상을 반영한다. 바이인 1만원(최저)~100만원(최고)을 로그 스케일로 0~1 사이 값(t)으로
+    // 환산해서, 그 사이를 선형 보간한다:
+    //  - Maniac/Station(루즈·약한 성향)은 낮은 스테이크에서 15%씩 → 높은 스테이크에서 2~3%까지 줄어듦
+    //  - TAG(가장 균형 잡히고 블러프/C-Bet 등 완성도 높은 성향)는 35% → 65%까지 늘어남
+    //  - Rock은 나머지(1에서 위 세 개를 뺀 값)로 자동 계산되어 항상 합이 100%가 되도록 함
+    function assignAiPersonality(buyIn) {
+      const t = getStakesFactor(buyIn, BUYIN_PRESETS[0], BUYIN_PRESETS[BUYIN_PRESETS.length - 1]);
+      const maniacPct = 0.15 + (0.02 - 0.15) * t;
+      const stationPct = 0.15 + (0.03 - 0.15) * t;
+      const tagPct = 0.35 + (0.65 - 0.35) * t;
+      // Rock은 나머지 - 위 세 비율의 합이 절대 1을 넘지 않으므로 항상 0 이상으로 유지됨
+
+      const rand = Math.random();
+      if (rand < maniacPct) return "Maniac";
+      if (rand < maniacPct + stationPct) return "Station";
+      if (rand < maniacPct + stationPct + tagPct) return "TAG";
+      return "Rock";
     }
 
     // 💡 추가: 배럴링(멀티스트리트 서사) 분석.
@@ -977,7 +1051,7 @@
       const phaseNames = { preflop: "프리플랍", flop: "플랍", turn: "턴", river: "리버" };
 
       actions.forEach((act, idx) => {
-        const { phase, type, investedAmount, isAllIn, ev, drawInfo, pot, toCall, opponentsCount, hole, community, spr, positionTier, positionLabel, remainingPlayers, raiseCount, actorsRemainingAfterMe } = act;
+        const { phase, type, investedAmount, isAllIn, ev, drawInfo, pot, toCall, opponentsCount, hole, community, spr, positionTier, positionLabel, remainingPlayers, raiseCount, actorsRemainingAfterMe, stackDepthBB, bb: actBB } = act;
         let score = 70;
         let comment = "판단 보류 (정보 부족)";
 
@@ -994,16 +1068,23 @@
           let pfScore = 70;
           let pfComment = "";
 
-          // 💡 수정: 추천 액션 계산이 decideAI의 실제 판단(팟오즈 완화, BB 방어 특혜, 림프 기준)을
-          // 반영 안 하고 있어서, 실제로는 AI라면 콜했을 손인데 "폴드했어야죠"라고 잘못 추천하는
-          // 정확성 문제가 있었다. decideAI와 동일한 계산을 그대로 재현해서 일치시킨다.
+          // 💡 수정: 추천 액션 계산이 decideAI의 실제 판단(팟오즈 완화, BB 방어 특혜, 림프 기준,
+          // 스택 깊이)을 반영 안 하고 있어서, 실제로는 AI라면 콜/오픈했을 손인데 "폴드했어야죠"라고
+          // 잘못 추천하는 정확성 문제가 있었다. decideAI와 동일한 계산을 그대로 재현해서 일치시킨다.
           const remaining = actorsRemainingAfterMe || 0;
           let posAdj;
           if (remaining >= 5) posAdj = 1.5;
           else if (remaining === 4) posAdj = 0.8;
           else if (remaining === 3) posAdj = 0.3;
           else posAdj = -1.3;
-          const openTh = 6 + posAdj;
+          // 💡 추가: 스택 깊이(유효 BB) 조정 - decideAI의 stackAdjust와 동일한 로직. 숏스택이면
+          // 임플라이드 오즈 노리는 패의 가치가 떨어져서 더 타이트한 기준을 요구해야 정확한 평가가 된다.
+          const depthBB = stackDepthBB || 100;
+          let stackAdj = 0;
+          if (depthBB <= 20) stackAdj = 2;
+          else if (depthBB <= 40) stackAdj = 1;
+          else if (depthBB >= 150) stackAdj = -1;
+          const openTh = 6 + posAdj + stackAdj;
           const limpTh = openTh - 6; // decideAI와 동일한 림프 기준(오픈 기준보다 6점 낮음)
           const threeBetTh = 11;
           // 💡 추가: decideAI와 동일하게 팟오즈 완화 + BB 방어 특혜를 반영한 실효 방어 기준.
@@ -1039,6 +1120,37 @@
               else { pfScore = 80; pfComment = `전투력 ${chenScore}점으로 무난한 오픈입니다.`; }
             } else {
               pfScore = 35; pfComment = `전투력 ${chenScore}점의 약한 패로 오픈 레이즈했습니다. 포지션과 무관하게 장기적으로 손해보기 쉬운 시도입니다.`;
+            }
+            // 💡 추가: 숏스택(15bb 이하)인데 올인이 아니었다면 사이징 지적을 덧붙인다. decideAI는
+            // 이 구간에서 표준 사이즈 대신 무조건 올인(푸시/폴드)하는데, 어중간하게 조금만 레이즈하면
+            // 스택 대부분이 이미 팟에 들어가서 사실상 커밋된 채로 뒷수습만 어려워지는 경우가 많다.
+            if (depthBB <= 15 && !isAllIn && pfScore >= 55) {
+              pfScore = Math.max(50, pfScore - 15);
+              pfComment += ` 다만 스택이 ${Math.round(depthBB)}bb 정도로 짧을 땐 어중간하게 레이즈하기보다 아예 올인(푸시)하는 게 더 정석적입니다.`;
+            } else if (!isAllIn && pfScore >= 55) {
+              // 💡 추가: 숏스택이 아닌 일반적인 상황에서의 베팅 사이즈 채점. 오픈은 2.5~4BB, 3벳은
+              // 상대가 낸 금액의 2.5~4배가 정석 범위(decideAI가 오픈 3BB/3벳 3배를 표준으로 쓰는
+              // 것과 같은 기준). 범위를 벗어나면 방향(작다/크다)을 짚어주되, 손패 평가 자체는 이미
+              // 위에서 끝났으니 감점 폭은 크지 않게(최대 10점) 잡는다.
+              if (isThreeBetSituation && toCall > 0) {
+                const sizeRatio = investedAmount / toCall;
+                if (sizeRatio < 2.2) {
+                  pfScore = Math.max(50, pfScore - 8);
+                  pfComment += ` 다만 재레이즈 사이즈가 상대가 낸 금액의 ${sizeRatio.toFixed(1)}배로 다소 작습니다(정석은 2.5~4배 안팎).`;
+                } else if (sizeRatio > 4.5) {
+                  pfScore = Math.max(50, pfScore - 6);
+                  pfComment += ` 다만 재레이즈 사이즈가 상대가 낸 금액의 ${sizeRatio.toFixed(1)}배로 다소 큽니다(정석은 2.5~4배 안팎).`;
+                }
+              } else if (!isThreeBetSituation && actBB > 0) {
+                const sizeInBB = investedAmount / actBB;
+                if (sizeInBB < 2.2) {
+                  pfScore = Math.max(50, pfScore - 8);
+                  pfComment += ` 다만 오픈 사이즈가 ${sizeInBB.toFixed(1)}BB로 다소 작습니다(정석은 2.5~4BB 안팎).`;
+                } else if (sizeInBB > 4.5) {
+                  pfScore = Math.max(50, pfScore - 6);
+                  pfComment += ` 다만 오픈 사이즈가 ${sizeInBB.toFixed(1)}BB로 다소 큽니다(정석은 2.5~4BB 안팎).`;
+                }
+              }
             }
           } else if (type === "call") {
             if (isThreeBetSituation) {
@@ -1370,13 +1482,32 @@
     }
 
 
-    function decideAI(ev, toCall, chips, pot, aiType, drawInfo, hole, community, bb, streetStartPot, opponentsCount, opponentProfile, spr, positionTier, positionLabel, remainingPlayers, raiseCount = 0, actorsRemainingAfterMe = 0, isPreflopAggressor = false) {
+    function decideAI(ev, toCall, chips, pot, aiType, drawInfo, hole, community, bb, streetStartPot, opponentsCount, opponentProfile, spr, positionTier, positionLabel, remainingPlayers, raiseCount = 0, actorsRemainingAfterMe = 0, isPreflopAggressor = false, facingUserRaise = false) {
       // 💡 추가: 프리플랍(커뮤니티 카드 0장) 전용 분기. 포스트플랍 판단 장치(SPR 커밋, 보드 위협도,
       // 탑페어/투페어 비교 등)는 전부 보드가 있다는 걸 전제로 하므로 여기서는 전부 건너뛰고,
       // 첸 포뮬러(evaluatePreflop) 점수 하나로 오픈레이즈/콜/폴드를 판단한다. 레인지 차트(포지션×성향별
       // 하드코딩 배열)를 쓰지 않고 가벼운 점수 공식+컷오프로 대체하는 방향.
       if (community.length === 0) {
         const chenScore = evaluatePreflop(hole);
+
+        // 💡 추가: 스테이크(판돈) 규모 계수 - BB가 곧 바이인/100 근사치이므로 BB 100(1만원 바이인)~
+        // 10000(100만원 바이인) 구간을 로그 스케일 0~1로 환산한다. 경계값 믹싱 폭과 상대 읽기 익스플로잇
+        // 강도 조절에 재사용 - 판이 커질수록 AI가 더 날카롭고(믹싱 폭 좁음) 더 공격적으로 상대 패턴을
+        // 파고든다(익스플로잇 강화).
+        const stakesFactor = getStakesFactor(bb, 100, 10000);
+        // 💡 추가: 경계값 믹싱 폭도 스테이크에 따라 조정. 낮은 스테이크(약한 상대)는 넓게 섞어서
+        // 판단이 들쭉날쭉하고, 높은 스테이크(고수)는 좁게 섞어서 거의 기준값 그대로 딱 자르듯 판단한다.
+        const mixWidth = 2.5 + (0.5 - 2.5) * stakesFactor;
+
+        // 💡 추가: 스택 깊이(유효 빅블라인드 개수) 반영. 실전에선 숏스택일수록 임플라이드 오즈를
+        // 노리는 투기성 패(수티드 커넥터 등)의 가치가 크게 떨어져서 더 타이트하게 플레이하고,
+        // 딥스택일수록 그런 패의 가치가 커져서 조금 더 루즈하게 플레이한다. 지금까지는 스택이
+        // 얼마나 깊든 프리플랍 기준이 완전히 똑같았다.
+        const stackDepthBB = bb > 0 ? chips / bb : 100;
+        let stackAdjust = 0;
+        if (stackDepthBB <= 20) stackAdjust = 2;        // 숏스택 - 확실한 패만
+        else if (stackDepthBB <= 40) stackAdjust = 1;   // 다소 숏 - 살짝 타이트
+        else if (stackDepthBB >= 150) stackAdjust = -1; // 딥스택 - 살짝 루즈(임플라이드 오즈)
 
         // 💡 수정: 기존엔 선형 보정(actorsRemainingAfterMe*0.6) 위에 레이트 포지션만 별도 보너스를
         // 덧붙이는 식이었는데, 실제 솔버 기반 오픈 레인지 데이터(UTG 약 15%, 컷오프 약 25%,
@@ -1396,17 +1527,40 @@
         if (aiType === "Maniac") personalityAdjust = -4;
         else if (aiType === "Rock") personalityAdjust = 3;
 
+        // 💡 추가: 유저의 프리플랍 패턴을 읽어서 반영(opponentRead 시스템의 프리플랍 확장). 실전
+        // 포커에서는 상대가 계속 나에게 접어주면 블러프를 늘리고, 상대가 좀처럼 안 여는 편이면 그
+        // 레이즈를 존중해서 더 신중하게 대응하는 식으로 계속 조정하는데, 지금까지는 프리플랍 판단이
+        // 완전히 고정값이라 유저가 아무리 특정 패턴을 반복해도 AI가 전혀 눈치채지 못했다.
+        // - foldExploitAdjust: 유저가 레이즈에 잘 접어주는 편(foldToRaiseRate>0.5)이면 오픈/3벳
+        //   기준을 낮춰서 더 자주 찔러본다. 테이블 전체를 상대로 넓게 반영.
+        // - userRaiseRespect: 지금 대응하는 레이즈가 유저 본인의 것이면, 유저의 평소 오픈 빈도로
+        //   신뢰도를 판단한다 - 유저가 평소 타이트하면(오픈 빈도 낮음) 이 레이즈를 더 존중해서
+        //   방어 기준을 높이고, 유저가 루즈하면 반대로 낮춘다.
+        // 💡 추가: 이 조정의 최대 폭(캡)도 스테이크에 따라 다르게 - 낮은 스테이크(약한 상대)는
+        // 읽은 패턴을 봐도 약하게만 반영하고, 높은 스테이크(고수)는 같은 패턴을 훨씬 강하게 파고든다.
+        const exploitCap = 2 + (5 - 2) * stakesFactor;
+        let foldExploitAdjust = 0;
+        let userRaiseRespect = 0;
+        if (opponentProfile) {
+          const foldTendency = (opponentProfile.preflopFoldToRaiseRate - 0.5) * 6;
+          foldExploitAdjust = Math.max(-exploitCap, Math.min(exploitCap, foldTendency));
+          if (facingUserRaise) {
+            const tightnessSignal = (0.25 - opponentProfile.preflopOpenRate) * 8;
+            userRaiseRespect = Math.max(-exploitCap, Math.min(exploitCap, tightnessSignal));
+          }
+        }
+
         // 💡 수정: 기존 오픈 기준(상위 10.7%)이 너무 타이트해서 거의 다 폴드해버리고, 아무도 안 걸면
         // 빅블라인드가 액션 한 번 없이 팟을 가져가는(워크) 상황이 지나치게 잦았다. 실제 1326가지
         // 조합 기준 상위% 분포표(CHEN_PERCENTILE_TABLE)를 참고해서 오픈 기준을 6점(상위 25.5%,
         // 흔히 쓰이는 오픈 레인지 폭에 가까움)으로 완화했다.
-        const openThreshold = 6 + positionAdjust + personalityAdjust;
+        const openThreshold = 6 + positionAdjust + personalityAdjust - foldExploitAdjust + stackAdjust;
         // 💡 수정: 방어(콜) 기준도 8점(상위 10.7%, 고정값)에서 오픈 기준과 같은 방식(포지션 반영,
         // 기준점만 더 낮게)으로 완화했다. 예전엔 레이즈 하나 나오면 나머지 전원이 거의 다 접어서
         // 2명(레이저+많아야 1명)만 플랍을 보는 경우가 지나치게 많았는데, 방어 기준을 오픈 기준에
         // 가깝게 낮춰서(레이트 포지션 기준 상위 25.5%) 여러 명이 같이 남는 멀티웨이 팟이 더 자주
         // 나오도록 했다.
-        const defendThreshold = 6 + positionAdjust + Math.floor(personalityAdjust / 2);
+        const defendThreshold = 6 + positionAdjust + Math.floor(personalityAdjust / 2) + stackAdjust;
         // 💡 버그 수정: 게임 엔진은 action.amount를 'toCall 위에 얹는 금액'으로 해석해서
         // total = toCall + action.amount로 계산한다(applyAction 참고). 그런데 여기서는 '원하는
         // 최종 오픈 사이즈(3BB)' 자체를 amount로 그대로 넘기고 있어서, 실제로는 toCall(=BB) +
@@ -1417,7 +1571,13 @@
 
         if (raiseCount === 0) {
           // 아직 아무도 레이즈하지 않음(블라인드만 걸려있음) - 오픈할지 결정
-          if (chenScore >= openThreshold) return { type: "bet", amount: Math.min(openRaiseAmount, chips) };
+          if (mixedThresholdCheck(chenScore, openThreshold, mixWidth)) {
+            // 💡 추가: 숏스택(15bb 이하)이면 표준 사이즈(3BB) 대신 그냥 올인한다 - 실전의 '푸시/폴드'
+            // 전략. 스택이 얕을 땐 어차피 표준 레이즈를 해도 SPR이 낮아 사실상 커밋되는 판이 많아서,
+            // 어중간하게 조금씩 내는 것보다 처음부터 폴드 이퀴티를 최대한 활용하는 올인이 더 효율적이다.
+            const amount = stackDepthBB <= 15 ? chips : Math.min(openRaiseAmount, chips);
+            return { type: "bet", amount };
+          }
           if (toCall === 0) return { type: "check" }; // 콜할 것도 없이 내 차례 옵션(빅블라인드 옵션 등)
           // 💡 버그 수정: 기존엔 Station만 오픈 기준 미달 시 콜(림프)이 가능하고 나머지 성향은
           // 무조건 폴드였다. 그 결과 첫 오픈이 나오기도 전에 대부분 이미 폴드해버려서, 실제로 3000핸드
@@ -1434,7 +1594,7 @@
         // 💡 추가: 누군가 이미 레이즈한 상황에서 콜/폴드만 하던 것을, 프리미엄 패면 재레이즈(3벳/4벳)도
         // 가능하도록 확장. 첸 스코어 상위 2~4%대(성향별 보정)를 재레이즈 기준으로 삼는다 - 방어(콜)
         // 기준보다 훨씬 좁아서, "콜할 만한 패"와 "재레이즈할 만큼 강한 패"가 구분된다.
-        const threeBetThreshold = 11 + Math.floor(personalityAdjust / 2);
+        const threeBetThreshold = 11 + Math.floor(personalityAdjust / 2) - foldExploitAdjust;
         // 레이즈 전쟁 억제: 레이즈가 계속 오갈수록(raiseCount 누적) 재레이즈 확률을 점점 낮춘다.
         const reRaiseChance = Math.max(0.15, 1 - Math.max(0, raiseCount - 1) * 0.4);
         // 재레이즈 사이즈: 상대가 낸 금액(toCall)의 약 3배를 목표 총액으로 - 표준적인 3벳 사이즈 관례.
@@ -1442,8 +1602,10 @@
         const desiredThreeBetTotal = Math.max(toCall + bb * 2, Math.round((toCall * 3) / roundingUnitForBB(bb)) * roundingUnitForBB(bb));
         const threeBetAmount = Math.max(0, desiredThreeBetTotal - toCall);
 
-        if (chenScore >= threeBetThreshold && Math.random() < reRaiseChance) {
-          return { type: "bet", amount: threeBetAmount };
+        if (mixedThresholdCheck(chenScore, threeBetThreshold, mixWidth) && Math.random() < reRaiseChance) {
+          // 💡 추가: 숏스택이면 3벳도 표준 사이즈 대신 올인 - 위 오픈과 같은 이유(푸시/폴드).
+          const amount = stackDepthBB <= 15 ? chips : threeBetAmount;
+          return { type: "bet", amount };
         }
         // 💡 추가: 가끔 블러프성 재레이즈도 섞는다(주로 Maniac) - 매번 프리미엄에만 재레이즈하면
         // "재레이즈 = 무조건 초강패"라는 패턴이 너무 뻔해져서 상대(유저)가 쉽게 읽어버린다.
@@ -1465,9 +1627,9 @@
         // 상태라 실질 콜 비용이 더 작고(팟오즈 완화로 이미 일부 반영됨), 무엇보다 뒤에 재레이즈로
         // 스퀴즈당할 위험이 0이다(액션이 나로 끝남) - 이건 팟오즈와 별개의 요인이라 추가로 반영한다.
         const bbDefenseBonus = (community.length === 0 && raiseCount >= 1 && actorsRemainingAfterMe === 0) ? 2.5 : 0;
-        const effectiveDefendThreshold = defendThreshold - potOddsRelief - bbDefenseBonus;
+        const effectiveDefendThreshold = defendThreshold - potOddsRelief - bbDefenseBonus + userRaiseRespect;
 
-        if (chenScore >= effectiveDefendThreshold) return { type: "call" };
+        if (mixedThresholdCheck(chenScore, effectiveDefendThreshold, mixWidth)) return { type: "call" };
         if (toCall === 0) return { type: "check" };
         return { type: "fold" };
       }
@@ -1758,6 +1920,9 @@
         // 💡 추가: 딜러 버튼 위치(players 배열 인덱스). 매 핸드 시계방향(다음 인덱스)으로 이동.
         // 액션 순서를 이 위치 기준으로 동적으로 계산하는 데 쓰인다(고정 순서였던 것을 대체).
         buttonIndex: 0,
+        // 💡 추가: 토너먼트 모드 여부(기본 false=캐시게임). 캐시게임은 블라인드 고정+탈락 자리 자동
+        // 리바이, 토너먼트는 10핸드마다 블라인드 자동 상승+탈락하면 그대로 아웃(리바이 없음).
+        tournamentMode: false,
         // 💡 추가: 프리플랍에서 마지막으로 레이즈한 사람(공격 주도권을 쥔 사람) 기록. 플랍에서
         // C-Bet(연속 베팅) 빈도를 조정하는 데 쓰인다. 매 핸드 시작 시 null로 초기화됨.
         preflopAggressor: null,
@@ -1795,7 +1960,14 @@
         handNum: 0,
         lastWinner: null,
         handWinners: {}, // 새로 추가: 승리자와 획득 금액을 기록하는 객체
-        opponentRead: { betsFaced: 0, foldsToBet: 0, totalActions: 0, aggressiveActions: 0 },
+        opponentRead: {
+          betsFaced: 0, foldsToBet: 0, totalActions: 0, aggressiveActions: 0,
+          // 💡 추가: 프리플랍 전용 지표. 유저가 프리플랍에서 오픈 기회가 왔을 때 실제로 얼마나
+          // 자주 여는지(오픈 빈도), 레이즈를 맞딱뜨렸을 때 3벳으로 되받는지/그냥 접는지를 추적한다.
+          // 이 게임의 AI가 유저에게만큼은 실제 포커처럼 '패턴을 읽고 조정'하도록 만드는 데 쓰인다.
+          preflopOpenChances: 0, preflopOpens: 0,
+          preflopRaiseFaced: 0, preflopThreeBets: 0, preflopFoldToRaise: 0
+        },
         revealCards: false, //추가: 패 공개 여부 추적
         userStats: createEmptyUserStats(), // 💡 추가: 여러 핸드 누적 유저 성향 통계
         gameWon: false, // 💡 추가: 상대를 모두 파산시켜 완전 승리했는지 여부
@@ -1804,14 +1976,25 @@
       };
     }
 
-    // 💡 새로 추가: opponentRead 누적치를 바탕으로 AI가 참고할 '유저 프로필'을 계산.
-    // 표본이 너무 적으면(8핸드 미만) 아직 판단하지 않고 null 반환 → AI는 중립적으로 플레이.
+    // 💡 수정: opponentRead 누적치를 바탕으로 AI가 참고할 '유저 프로필'을 계산. 표본 기준(몇 번
+    // 액션을 봐야 신뢰하기 시작하는지)을 스테이크 규모에 따라 다르게 한다 - 실제 포커에서도 낮은
+    // 스테이크의 약한 플레이어는 패턴을 읽어도 그걸 활용할 줄 모르지만(반응이 느림), 높은 스테이크의
+    // 고수는 몇 핸드만 봐도 빠르게 상대 패턴을 파악해서 반격한다(반응이 빠름). 바이인 1만원(최저)일
+    // 땐 15액션이 지나야 신뢰를 시작하고, 100만원(최고)일 땐 5액션만으로도 신뢰를 시작한다.
     function getOpponentProfile(s) {
       const r = s.opponentRead;
-      if (!r || r.totalActions < 10) return null; // 💡 액션 10번 이상부터 판단 시작
+      const t = getStakesFactor(s.startingChips, BUYIN_PRESETS[0], BUYIN_PRESETS[BUYIN_PRESETS.length - 1]);
+      const minTotal = Math.round(15 + (5 - 15) * t);
+      const minPreflop = Math.round(8 + (3 - 8) * t);
+      if (!r || r.totalActions < minTotal) return null;
       return {
         foldToBetRate: r.betsFaced > 0 ? (r.foldsToBet / r.betsFaced) : 0.4,
-        aggressionFreq: r.aggressiveActions / r.totalActions // 💡 공격성(베팅 빈도) 비율
+        aggressionFreq: r.aggressiveActions / r.totalActions, // 💡 공격성(베팅 빈도) 비율
+        // 💡 추가: 프리플랍 전용 지표. 표본이 minPreflop 미만이면 아직 신뢰하지 않고 중립값을 쓴다.
+        preflopOpenRate: r.preflopOpenChances >= minPreflop ? (r.preflopOpens / r.preflopOpenChances) : 0.25,
+        preflopFoldToRaiseRate: r.preflopRaiseFaced >= minPreflop ? (r.preflopFoldToRaise / r.preflopRaiseFaced) : 0.5,
+        preflopThreeBetRate: r.preflopRaiseFaced >= minPreflop ? (r.preflopThreeBets / r.preflopRaiseFaced) : 0.08,
+        stakesFactor: t // 💡 추가: 결정 로직에서 익스플로잇 강도를 조절할 때 재사용
       };
     }
 
@@ -2103,33 +2286,16 @@
         });
       };
 
-      // 💡 추가: 파산한 AI 좌석에 유저가 직접 '새 AI 참가'를 눌렀을 때 호출됨.
-      // 자동 리필이 아니라 수동이며, 번호는 그 좌석이 쓰던 번호를 계승하지 않고
-      // 지금까지 등장한 가장 마지막 번호 다음 번호를 새로 부여한다(nextAiNumber).
-      const handleAiRejoin = seatId => {
-        if (runningRef.current) return; // 핸드 진행 중에는 안전하게 무시 (버튼 자체도 그 사이엔 안 보임)
-        setGame(g => {
-          if (seatId === "user" || !g.eliminated[seatId]) return g; // 방어적 체크
-          const newNum = g.nextAiNumber || (g.aiCount + 1);
-          const rand = Math.random();
-          const newPersonality = rand < 0.1 ? "Maniac" : rand < 0.2 ? "Station" : rand < 0.6 ? "TAG" : "Rock";
-          const newName = `AI ${newNum}`;
-          // 💡 수정: 테이블의 원래 바이인으로 고정하는 대신, 유저의 현재 칩과 배수로 가장 가까운
-          // 프리셋으로 새 AI의 시작 칩을 정한다. 게임이 오래 진행되어 유저 스택이 커졌는데 새 AI가
-          // 계속 원래 바이인만큼(항상 숏스택)으로 들어오는 어색함을 피하기 위함.
-          const newChips = findClosestPresetByRatio(g.chips.user || 0);
-          const next = {
-            ...g,
-            names: { ...g.names, [seatId]: newName },
-            chips: { ...g.chips, [seatId]: newChips },
-            eliminated: { ...g.eliminated, [seatId]: false },
-            allIn: { ...g.allIn, [seatId]: false },
-            folded: { ...g.folded, [seatId]: false },
-            aiPersonalities: { ...g.aiPersonalities, [seatId]: newPersonality },
-            nextAiNumber: newNum + 1,
-          };
-          next.log = [...next.log, `💺 ${newName}이(가) 새로 참가했습니다 (칩 ${newChips.toLocaleString()})`];
-          return next;
+      // 💡 추가: 토너먼트 모드 켜기/끄기 - 설정화면에서만 누를 수 있고, 확인창을 거친다.
+      // 켜면: 블라인드가 10핸드마다 자동 상승, 탈락하면 그대로 아웃(리바이 없음), 최후의 1인 승리 조건 유지.
+      // 끄면(캐시게임, 기본값): 블라인드 고정, 탈락 자리에 새 AI가 자동으로 리바이.
+      const handleToggleTournamentMode = () => {
+        const turningOn = !game.tournamentMode;
+        const msg = turningOn
+          ? "토너먼트 모드를 켜면 블라인드가 10핸드마다 자동으로 상승합니다. 대신 상대가 탈락하면 리바이 없이 그대로 아웃되고, 전원 파산시키면 승리로 게임이 끝나요. 켤까요?"
+          : "토너먼트 모드를 끄면 블라인드가 고정되고, 탈락한 자리에는 새 AI가 자동으로 채워집니다(캐시게임 방식). 끌까요?";
+        askConfirm(msg, () => {
+          setGame(g => ({ ...g, tournamentMode: turningOn }));
         });
       };
 
@@ -2354,7 +2520,12 @@
               // 💡 추가: 이 액션 시점의 레이즈 누적 횟수 - 프리플랍 피드백에서 오픈과 3벳/4벳을
               // 구분하는 데 필요하다(기존엔 이 값이 없어서 항상 '오픈'으로만 취급되고 있었다).
               raiseCount: s.raiseCountThisStreet || 0,
-              actorsRemainingAfterMe: positionInfo.actorsRemainingAfterMe
+              actorsRemainingAfterMe: positionInfo.actorsRemainingAfterMe,
+              // 💡 추가: 이 액션 시점의 스택 깊이(유효 BB) - 프리플랍 피드백에서 숏스택/딥스택
+              // 조정(decideAI의 stackAdjust와 동일한 로직)을 반영하는 데 필요하다.
+              stackDepthBB: s.bb > 0 ? s.chips.user / s.bb : 100,
+              // 💡 추가: 프리플랍 베팅 사이즈 채점(오픈 몇 BB인지, 3벳이 상대 레이즈의 몇 배인지)에 필요
+              bb: s.bb
             });
 
             // 💡 추가: 유저의 전체 액션 횟수와 공격적 액션(베팅/레이즈) 카운트
@@ -2366,12 +2537,26 @@
               if (action.type === "fold") s.opponentRead.foldsToBet++;
             }
 
+            // 💡 추가: 프리플랍 전용 지표 기록 - AI가 유저의 프리플랍 패턴(오픈 빈도, 레이즈에
+            // 접는 빈도, 3벳 빈도)을 읽어서 조정할 수 있도록.
+            if (s.phase === "preflop") {
+              const raiseCountNow = s.raiseCountThisStreet || 0;
+              if (raiseCountNow === 0 && toCall > 0) {
+                s.opponentRead.preflopOpenChances++;
+                if (action.type === "bet") s.opponentRead.preflopOpens++;
+              } else if (raiseCountNow >= 1) {
+                s.opponentRead.preflopRaiseFaced++;
+                if (action.type === "bet") s.opponentRead.preflopThreeBets++;
+                else if (action.type === "fold") s.opponentRead.preflopFoldToRaise++;
+              }
+            }
+
           } else {
             await sleep(650 + Math.random() * 500);
             if (!gameStateRef.current.setupDone) return;
             // 💡 유저가 이번 핸드에 아직 살아있을 때만 '유저 프로필'을 반영 (이미 폴드했으면 반영할 대상이 없으므로 중립)
             const opponentProfile = (!s.folded.user && !s.eliminated.user) ? getOpponentProfile(s) : null;
-            action = decideAI(ev, toCall, s.chips[p], s.pot, s.aiPersonalities[p], drawInfo, s.hole[p], s.community, s.bb, s.streetStartPot, activeOpponentsCount, opponentProfile, sprInfo.spr, positionInfo.tier, positionInfo.label, remainingPlayersCount, s.raiseCountThisStreet || 0, positionInfo.actorsRemainingAfterMe, s.preflopAggressor === p);
+            action = decideAI(ev, toCall, s.chips[p], s.pot, s.aiPersonalities[p], drawInfo, s.hole[p], s.community, s.bb, s.streetStartPot, activeOpponentsCount, opponentProfile, sprInfo.spr, positionInfo.tier, positionInfo.label, remainingPlayersCount, s.raiseCountThisStreet || 0, positionInfo.actorsRemainingAfterMe, s.preflopAggressor === p, s.preflopAggressor === "user");
             if (action.type === "bet" && s.chips[p] <= toCall) action = { type: "call" };
           }
 
@@ -2572,11 +2757,36 @@
         setMeta(m => ({ ...m, checkpointChips: s.chips.user }));
 
         s.players.forEach(p => { if (s.chips[p] <= 0) s.eliminated[p] = true; });
+
+        // 💡 추가: 캐시게임(토너먼트 모드 아님)이면 탈락한 AI 자리에 새 AI가 자동으로 리바이한다
+        // (실제 카지노/펍 캐시게임처럼 - 누가 파산해서 나가면 곧바로 새 손님이 자리를 채우는 느낌).
+        // 토너먼트 모드에서는 리바이 없이 그대로 아웃(실제 프리즈아웃 토너먼트 규칙).
+        if (!s.tournamentMode) {
+          s.players.forEach(p => {
+            if (p === "user" || !s.eliminated[p]) return;
+            const newNum = s.nextAiNumber || (s.players.length);
+            const newChips = findClosestPresetByRatio(s.chips.user || 0);
+            // 💡 수정: 성향 배정도 지금 스테이크 규모(newChips)에 맞춰 조정 - 판이 커졌으면 더
+            // 정석적인 상대가 리바이하도록.
+            const newPersonality = assignAiPersonality(newChips);
+            const newName = `AI ${newNum}`;
+            s.names[p] = newName;
+            s.chips[p] = newChips;
+            s.eliminated[p] = false;
+            s.allIn[p] = false;
+            s.aiPersonalities[p] = newPersonality;
+            s.nextAiNumber = newNum + 1;
+            pushLog(s, `💺 ${newName}이(가) 새로 참가했습니다 (칩 ${newChips.toLocaleString()})`);
+          });
+        }
+
         if (s.eliminated.user) {
           s.over = true;
           s.gameWon = false; // 유저 탈락 = 패배
-        } else if (!s.over) {
-          // 💡 추가: 유저를 제외한 모든 상대가 탈락하면 유저의 완전 승리로 게임 종료
+        } else if (!s.over && s.tournamentMode) {
+          // 💡 수정: '전원 파산시키면 완전 승리' 조건은 토너먼트 모드에서만 의미가 있다. 캐시게임은
+          // 탈락 자리가 자동으로 채워지므로 이 조건이 사실상 영원히 성립하지 않는다(실제 캐시게임도
+          // 승패 없이 계속 도는 게 맞다).
           const opponents = s.players.filter(p => p !== "user");
           const allOpponentsEliminated = opponents.length > 0 && opponents.every(p => s.eliminated[p]);
           if (allOpponentsEliminated) {
@@ -2604,11 +2814,9 @@
           const aiPersonalities = {};
           players.forEach(p => {
             if (p !== "user") {
-              const rand = Math.random();
-              if (rand < 0.1) aiPersonalities[p] = "Maniac";
-              else if (rand < 0.2) aiPersonalities[p] = "Station";
-              else if (rand < 0.6) aiPersonalities[p] = "TAG";
-              else aiPersonalities[p] = "Rock";
+              // 💡 수정: 성향 배정을 바이인 규모(buyIn) 반영 함수로 교체 - 판이 클수록 정석적인
+              // 상대(TAG 위주) 비중이 늘어난다.
+              aiPersonalities[p] = assignAiPersonality(buyIn);
             }
           });
 
@@ -2620,11 +2828,16 @@
             sb: Math.max(50, Math.round((g.bb / 2) / 50) * 50), // 💡 추가: 스몰블라인드 = BB의 절반
             initialBB: g.bb, // 💡 수정: 블라인드 사다리의 기준값(배수를 곱하는 기준)
             blindLevel: 0,        // 💡 수정: 블라인드 사다리 레벨 초기화
+            tournamentMode: g.tournamentMode, // 💡 추가: 설정화면에서 고른 토너먼트 모드 유지
             startingChips: buyIn, // 💡 수정: 캡이 적용된 실제 바이인 금액 사용
             players,
             names,
             aiPersonalities,
-            chips: makeDict(players, buyIn),
+            // 💡 추가: 유저가 '전액'(뱅크롤 부족으로 1만원 미만 소액) 바이인으로 들어와도, AI는
+            // 그 소액을 그대로 물려받지 말고 최소 1만원(가장 작은 프리셋)으로 참가한다. 그래야
+            // 유저 혼자 극단적으로 짧은 스택이고 나머지는 정상 스택인, 실제로 더 자연스러운
+            // 상황(유저만 위기, 테이블은 평소대로)이 된다.
+            chips: { ...makeDict(players, Math.max(buyIn, BUYIN_PRESETS[0])), user: buyIn },
             invested: makeDict(players, 0),
             folded: makeDict(players, false),
             eliminated: makeDict(players, false),
@@ -2674,35 +2887,26 @@
 
         players.forEach(p => { if (s.eliminated[p]) s.folded[p] = true; });
 
-        // 💡 수정: 살아있는 전원(유저+AI)의 평균 스택이 처음 블라인드를 정했을 때보다 많이 불어났으면
-        // 블라인드도 같이 인상한다. 세션이 길어져 다들 스택이 커지는데 블라인드가 그대로면, 블라인드가
-        // 스택 대비 하찮아져서 SPR이 계속 깊어지고("깊음" 구간에 계속 머묾) 포스트플랍 판단이 느슨해지는
-        // 문제가 있었다 - 처음 BB를 '바이인의 1%'로 잡았던 것과 같은 이유.
-        // 임의의 계산값(1234, 3782 같은 애매한 숫자)이 아니라, BLIND_LEVEL_MULTIPLIERS라는 정해진 배수
-        // 사다리를 타고 오르게 해서 토너먼트 블라인드처럼 깔끔한 단위로만 움직이게 한다. 평균 스택
-        // 기준 '이상적인 BB'가 사다리의 다음 레벨 값 이상으로 올라섰을 때만 그 레벨로 올리며(여러
-        // 레벨을 한 번에 건너뛸 수도 있음 - 예: 더블업으로 스택이 급증한 경우), 절대 내려가지 않는다.
-        const activeForBlinds = players.filter(p => !s.eliminated[p]);
-        if (activeForBlinds.length > 0) {
-          const avgStack = activeForBlinds.reduce((sum, p) => sum + (s.chips[p] || 0), 0) / activeForBlinds.length;
-          const idealBB = calcRecommendedBB(avgStack); // 지금 스택 기준으로 '이상적인' 연속값
-          const baseBB = s.initialBB || s.bb;
+        // 💡 수정: 캐시게임(기본값)과 토너먼트 모드로 분기. 캐시게임은 실제 캐시게임처럼 블라인드가
+        // 절대 오르지 않고 완전히 고정된다(대신 탈락 자리는 자동 리바이로 SPR이 과하게 깊어지는 걸
+        // 막는다). 토너먼트는 스택과 무관하게 10핸드마다 무조건 한 레벨씩 올린다(실제 Sit & Go 방식).
+        // 기존엔 캐시게임에서도 평균 스택 기준으로 블라인드가 올랐었는데, 그건 사실 토너먼트 개념이라
+        // 이번에 토너먼트 모드 쪽으로 옮기고 캐시게임은 순수하게 고정시켰다.
+        if (s.tournamentMode) {
+          // 10핸드가 지날 때마다 스택과 무관하게 한 레벨씩 상승.
           const currentLevel = s.blindLevel || 0;
-          let newLevel = currentLevel;
-          for (let lvl = currentLevel + 1; lvl < BLIND_LEVEL_MULTIPLIERS.length; lvl++) {
-            const candidateBB = Math.max(100, Math.round(baseBB * BLIND_LEVEL_MULTIPLIERS[lvl] / 100) * 100);
-            if (candidateBB <= idealBB) newLevel = lvl;
-            else break;
-          }
-          if (newLevel > currentLevel) {
-            const newBB = Math.max(100, Math.round(baseBB * BLIND_LEVEL_MULTIPLIERS[newLevel] / 100) * 100);
+          const targetLevel = Math.min(BLIND_LEVEL_MULTIPLIERS.length - 1, Math.floor((s.handNum - 1) / 10));
+          if (targetLevel > currentLevel) {
+            const baseBB = s.initialBB || s.bb;
+            const newBB = Math.max(100, Math.round(baseBB * BLIND_LEVEL_MULTIPLIERS[targetLevel] / 100) * 100);
             const newSB = Math.max(50, Math.round((newBB / 2) / 50) * 50);
-            pushLog(s, `📈 평균 스택 증가로 블라인드 레벨이 ${currentLevel + 1} → ${newLevel + 1}로 올랐습니다 (SB/BB ${s.sb.toLocaleString()}/${s.bb.toLocaleString()} → ${newSB.toLocaleString()}/${newBB.toLocaleString()}).`);
+            pushLog(s, `🏆 토너먼트 블라인드 레벨이 ${currentLevel + 1} → ${targetLevel + 1}로 올랐습니다 (SB/BB ${s.sb.toLocaleString()}/${s.bb.toLocaleString()} → ${newSB.toLocaleString()}/${newBB.toLocaleString()}).`);
             s.bb = newBB;
             s.sb = newSB;
-            s.blindLevel = newLevel;
+            s.blindLevel = targetLevel;
           }
         }
+        // 💡 캐시게임(else)은 의도적으로 아무 것도 안 함 - 블라인드가 세션 내내 고정된다.
 
         pushLog(s, `── ${s.handNum}번째 핸드 시작 (버튼: ${s.names[players[s.buttonIndex]]}) ──`);
 
@@ -2803,6 +3007,9 @@
       const practiceRemainingPlayers = (game.players || []).filter(pl => !(game.eliminated && game.eliminated[pl])).length;
       const practiceTableDynamics = calculateTableDynamics(practiceRemainingPlayers);
 
+      // 💡 추가: 다음 블라인드 레벨 미리보기 - 언제(평균 스택 얼마부터), 얼마로(다음 SB/BB) 오르는지
+      const nextBlindInfo = game.started ? getNextBlindLevelInfo(game.blindLevel, game.initialBB, game.tournamentMode, game.handNum) : null;
+
       // 💡 추가: 연습모드 패널의 프리플랍 전용 표시 - '아웃츠/SPR' 대신 '홀카드 상위 %'와 추천 액션.
       const practiceChenScore = (game.hole && game.hole.user && game.community && game.community.length === 0)
         ? evaluatePreflop(game.hole.user)
@@ -2810,13 +3017,39 @@
       const practiceTopPercent = practiceChenScore !== null ? chenScoreToTopPercent(practiceChenScore) : null;
       let practicePreflopRecommendation = "";
       if (practiceChenScore !== null) {
-        // 💡 수정: decideAI와 동일하게 3단계 근사치 대신 실제 남은 액션 인원수 기반으로 계산
-        const posAdjust = (practicePositionInfo.actorsRemainingAfterMe || 0) * 0.6;
-        const openThreshold = 6 + posAdjust; // 💡 수정: decideAI와 동일한 기준(6점)으로 통일
-        if (livePracticeToCall === 0) {
-          practicePreflopRecommendation = practiceChenScore >= openThreshold ? "오픈 레이즈 추천" : "체크 무난";
+        // 💡 버그 수정: 이 연습패널(차트시트) 추천이 decideAI/사후 피드백과 다른 낡은 계산식을 쓰고
+        // 있어서, 차트시트는 "폴드 무난"이라는데 핸드 종료 후 피드백은 "콜"을 추천하는 모순이 있었다
+        // (팟오즈 완화·BB 방어 특혜·스택 깊이 조정이 전부 빠져있었음). decideAI와 완전히 동일한 계산을
+        // 그대로 재현해서 실시간 추천과 사후 피드백이 항상 일치하도록 통일한다.
+        const remaining = practicePositionInfo.actorsRemainingAfterMe || 0;
+        let posAdj;
+        if (remaining >= 5) posAdj = 1.5;
+        else if (remaining === 4) posAdj = 0.8;
+        else if (remaining === 3) posAdj = 0.3;
+        else posAdj = -1.3;
+        const practiceDepthBB = game.bb > 0 ? (game.chips.user || 0) / game.bb : 100;
+        let stackAdj = 0;
+        if (practiceDepthBB <= 20) stackAdj = 2;
+        else if (practiceDepthBB <= 40) stackAdj = 1;
+        else if (practiceDepthBB >= 150) stackAdj = -1;
+        const openThreshold = 6 + posAdj + stackAdj;
+        const raiseCountNow = game.raiseCountThisStreet || 0;
+
+        if (raiseCountNow === 0) {
+          if (livePracticeToCall === 0) {
+            practicePreflopRecommendation = practiceChenScore >= openThreshold ? "오픈 레이즈 추천" : "체크 무난";
+          } else {
+            const limpThreshold = openThreshold - 6;
+            practicePreflopRecommendation = practiceChenScore >= openThreshold ? "오픈 레이즈 추천"
+              : practiceChenScore >= limpThreshold ? "림프(콜)도 고려 가능" : "폴드 무난";
+          }
         } else {
-          practicePreflopRecommendation = practiceChenScore >= openThreshold ? "콜/레이즈 고려 가능" : "폴드 무난";
+          const threeBetThreshold = 11;
+          const potOddsRelief = Math.max(0, Math.min(4, (0.35 - practicePotOdds) * 12));
+          const bbDefenseBonus = remaining === 0 ? 2.5 : 0;
+          const effectiveDefendTh = openThreshold - potOddsRelief - bbDefenseBonus;
+          practicePreflopRecommendation = practiceChenScore >= threeBetThreshold ? "재레이즈(3벳) 추천"
+            : practiceChenScore >= effectiveDefendTh ? "콜/방어 가능" : "폴드 무난";
         }
       }
 
@@ -2947,7 +3180,7 @@
                       style={{ ...styles.buyInPresetBtn, ...styles.buyInPresetBtnActive }}
                       onClick={() => selectBuyIn(meta.bankroll)}
                     >
-                      전액 {meta.bankroll.toLocaleString()}
+                      전액 {formatKoreanAmount(meta.bankroll, 100000)}
                     </button>
                   </div>
                 ) : (
@@ -2955,14 +3188,14 @@
                     <button style={styles.aiStepBtn} disabled={presetIdx <= 0} onClick={() => cycleBuyIn(-1)}>‹</button>
                     <div style={styles.buyInCarouselCenter}>
                       <div style={{ ...styles.setupValueDisplay, ...(isBuyInUnlocked ? {} : styles.buyInLockedValue) }}>
-                        {currentPreset.toLocaleString()}
+                        {formatKoreanAmount(currentPreset, 100000)}
                       </div>
                       {!isBuyInUnlocked ? (
-                        <div style={styles.buyInSubNote}>🔒 뱅크롤 {currentThreshold.toLocaleString()} 이상 필요</div>
+                        <div style={styles.buyInSubNote}>🔒 뱅크롤 {formatKoreanAmount(currentThreshold, 100000)} 이상 필요</div>
                       ) : effectiveBuyIn < currentPreset ? (
-                        <div style={styles.buyInSubNote}>보유 뱅크롤이 부족해 실제로는 {effectiveBuyIn.toLocaleString()}으로 시작</div>
+                        <div style={styles.buyInSubNote}>보유 뱅크롤이 부족해 실제로는 {formatKoreanAmount(effectiveBuyIn, 100000)}으로 시작</div>
                       ) : (
-                        <div style={styles.buyInSubNote}>해금됨: 뱅크롤 {currentThreshold.toLocaleString()} 이상 필요</div>
+                        <div style={styles.buyInSubNote}>해금됨: 뱅크롤 {formatKoreanAmount(currentThreshold, 100000)} 이상 필요</div>
                       )}
                     </div>
                     <button
@@ -2981,9 +3214,20 @@
                   전제로 튜닝되어 있어서, 유저가 임의로 블라인드를 크게/작게 바꾸면 그 전제가 깨져서
                   AI가 이상하게 판단할 위험이 있었다. 그래서 조절 UI 자체를 없애고 자동 계산값만 보여준다. */}
               <div style={styles.setupItemWrap}>
-                <div style={styles.setupItemTitle}>블라인드 (SB / BB)</div>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <div style={styles.setupItemTitle}>블라인드 (SB / BB)</div>
+                  {/* 💡 추가: 토너먼트 모드 토글 - 오른쪽 위, 눌렀을 때 확인창을 거쳐 전환 */}
+                  <button
+                    style={{ ...styles.tournamentToggleBtn, ...(game.tournamentMode ? styles.tournamentToggleBtnActive : {}) }}
+                    onClick={handleToggleTournamentMode}
+                  >
+                    🏆 토너먼트 모드 {game.tournamentMode ? "ON" : "OFF"}
+                  </button>
+                </div>
                 <div style={{ ...styles.setupValueDisplay, alignSelf: "center", width: "auto", whiteSpace: "nowrap" }}>{game.sb.toLocaleString()} / {game.bb.toLocaleString()}</div>
-                <div style={styles.buyInSubNote}>게임 진행에 따라 상승합니다.</div>
+                <div style={styles.buyInSubNote}>
+                  {game.tournamentMode ? "10핸드마다 자동으로 상승합니다." : "고정 블라인드입니다 (캐시게임)."}
+                </div>
               </div>
 
               {/* 💡 수정: 차트 시트 구매 섹션을 '상점' 진입 박스로 교체 */}
@@ -3194,8 +3438,6 @@
                         key={p}
                         id={p}
                         game={game}
-                        onRejoin={handleAiRejoin}
-                        canRejoin={!(game.phase === "preflop" || game.phase === "flop" || game.phase === "turn" || game.phase === "river")}
                       />
                     ))}
                   </div>
@@ -3203,7 +3445,15 @@
                   <div style={styles.centerArea}>
                     <div style={styles.potRow}>
                       {/* 💡 수정: 헤더에 있던 앤티 표시를 팟 왼쪽으로 이동 */}
-                      <div style={styles.anteBadgeSmall}>SB/BB {game.sb.toLocaleString()}/{game.bb.toLocaleString()} (Lv.{(game.blindLevel || 0) + 1})</div>
+                      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 3 }}>
+                        <div style={styles.anteBadgeSmall}>SB/BB {game.sb.toLocaleString()}/{game.bb.toLocaleString()} (Lv.{(game.blindLevel || 0) + 1})</div>
+                        {/* 💡 추가: 다음 블라인드 레벨이 언제, 얼마로 오르는지 미리 보여준다 */}
+                        {nextBlindInfo && (
+                          <div style={styles.nextBlindPreview}>
+                            🕒 다음 레벨까지 {nextBlindInfo.handsUntilNext}핸드: SB/BB {nextBlindInfo.nextSB.toLocaleString()}/{nextBlindInfo.nextBB.toLocaleString()}
+                          </div>
+                        )}
+                      </div>
                       <div style={styles.potWrap}>
                         <span style={styles.potLabel}>POT</span>
                         <span style={styles.potValue}>{game.pot.toLocaleString()}</span>
@@ -3432,22 +3682,22 @@
                       {/* 💡 새로운 세로형 칩 컨트롤 UI */}
                       <div style={styles.betControlWrap}>
                         <div style={styles.betAmountDisplay}>
-                          <span style={styles.betAmountLabel}>{toCall > 0 ? "레이즈(추가) 금액" : "베팅 금액"}</span>
-                          <span style={styles.betAmountValue}>{betAmount.toLocaleString()}</span>
-                          {/* 💡 추가: 레이즈 상황일 때 아래에 총 지불 금액 표시 */}
-                          {toCall > 0 && (
-                            <span style={{ fontSize: 13, color: "#D9B95C", marginTop: 6, fontWeight: 700, fontFamily: "'Courier New', monospace" }}>
-                              총 지불: {(toCall + betAmount).toLocaleString()}
-                            </span>
-                          )}
+                          <span style={styles.betAmountLabel}>베팅 금액</span>
+                          {/* 💡 수정: '레이즈(추가) 금액'과 '총 지불'을 따로 보여주던 것을 하나로 통일.
+                              내부적으로는 betAmount가 여전히 toCall 위에 얹는 증분으로 관리되지만
+                              (게임 엔진 규약), 화면에는 실제로 지불하게 될 총액(toCall+betAmount) 하나만
+                              보여줘서 유저가 두 숫자를 따로 확인/암산할 필요가 없게 했다. */}
+                          <span style={styles.betAmountValue}>{(toCall + betAmount).toLocaleString()}</span>
                         </div>
 
-                        {/* 💡 수정: 칩 단위를 고정값([100,500,1000,10000]) 대신 현재 BB 기준 배수로 동적
-                            계산. BB=100일 땐 기존과 완전히 같은 값([100,500,1000,10000])이 나오지만,
-                            바이인이 커져서 BB가 올라가면 단위도 같이 커져서 100만원대 바이인에서도
-                            큰 단위로 빠르게 베팅액을 조절할 수 있다. */}
+                        {/* 💡 수정: BB가 오르면 단위 전체가 [bb, bb*5, bb*10, bb*100]으로 통째로
+                            바뀌는 방식이었는데, 그러면 판돈이 커질 때 기존에 쓰던 작은 단위(100/500 등)로
+                            섬세하게 조절하는 게 안 되는 문제가 있었다. 기본 4단위(100/500/1000/10000)는
+                            그대로 고정해두고, 평균 금액(BB)이 커질수록 오른쪽에 더 큰 단위(10만/100만)를
+                            추가하는 방식으로 변경 - 기존 단위를 잃지 않으면서 큰 판에서 빠르게 조절할
+                            수 있는 옵션만 늘어난다. */}
                         <div style={styles.chipColumnsWrap}>
-                          {[game.bb, game.bb * 5, game.bb * 10, game.bb * 100].map(chip => (
+                          {[100, 500, 1000, 10000, ...(game.bb >= 1000 ? [100000] : []), ...(game.bb >= 10000 ? [1000000] : [])].map(chip => (
                             <div key={chip} style={styles.chipColumn}>
                               <button
                                 style={styles.chipBtn}
@@ -3456,7 +3706,7 @@
                               >
                                 +
                               </button>
-                              <div style={styles.chipLabel}>{chip.toLocaleString()}</div>
+                              <div style={styles.chipLabel}>{formatKoreanAmount(chip)}</div>
                               <button
                                 style={styles.chipBtn}
                                 disabled={!game.awaitingUser || betAmount <= uiMinBet}
@@ -3491,7 +3741,7 @@
                           disabled={!game.awaitingUser || !userCanRaise || userChips <= toCall}
                           onClick={() => onUserBet(betAmount)}
                         >
-                          {toCall > 0 ? `레이즈 (총 ${(toCall + betAmount).toLocaleString()})` : `베팅 ${betAmount.toLocaleString()}`}
+                          {toCall > 0 ? `레이즈 (${(toCall + betAmount).toLocaleString()})` : `베팅 (${betAmount.toLocaleString()})`}
                         </button>
                       </div>
                     </div>
@@ -3514,7 +3764,7 @@
         </div>
       );
     }
-    function AiSeat({ id, game, onRejoin, canRejoin }) {
+    function AiSeat({ id, game }) {
       const folded = game.folded[id];
       const eliminated = game.eliminated[id];
       const showCards = (game.phase === "showdown" && !folded) || game.revealCards;
@@ -3573,20 +3823,6 @@
               <div style={styles.actionBadge}>{game.lastAction[id]}</div>
             )}
           </div>
-
-          {/* 💡 수정: '새 AI 참가' 버튼을 좌석 박스(opacity 0.35 적용됨) 바깥의 별도 wrapper로 옮김.
-              CSS opacity는 자식 요소에도 그대로 곱해져서 상속되기 때문에, 안쪽에 두면 버튼 자체 스타일과
-              무관하게 흐리게 보일 수밖에 없었다. 핸드 진행 중(플랍/턴/리버)엔 숨겨서 게임 로직과의
-              충돌(레이스 컨디션)을 피한다. 번호는 이 좌석이 쓰던 번호를 이어받지 않고 handleAiRejoin이
-              매번 새로 발급하는 다음 번호를 사용한다. */}
-          {eliminated && canRejoin && (
-            <button
-              style={styles.aiRejoinBtn}
-              onClick={() => onRejoin(id)}
-            >
-              ➕ 새 AI 참가
-            </button>
-          )}
         </div>
       );
     }
@@ -3677,6 +3913,15 @@
         border: "1px solid rgba(201,164,76,0.15)"
       },
       setupItemTitle: { fontSize: 13, color: "#8FAE9C", fontFamily: "'Courier New', monospace", letterSpacing: 1 },
+      // 💡 추가: 토너먼트 모드 토글 버튼 - 꺼져있으면 은은하게, 켜져있으면 금색으로 강조
+      tournamentToggleBtn: {
+        fontSize: 11, padding: "4px 8px", borderRadius: 6, cursor: "pointer",
+        background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.15)",
+        color: "#8FAE9C", fontFamily: "'Courier New', monospace",
+      },
+      tournamentToggleBtnActive: {
+        background: "rgba(201,164,76,0.25)", border: "1px solid #C9A44C", color: "#F4EDD8",
+      },
       setupStepBtn: {
         padding: "6px 8px", borderRadius: 6, border: "1px solid rgba(201,164,76,0.4)",
         background: "rgba(255,255,255,0.06)", color: "#F4EDD8", fontSize: 12, fontWeight: 700,
@@ -3891,6 +4136,10 @@
         background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.12)",
         borderRadius: 8, padding: "4px 10px", whiteSpace: "nowrap",
       },
+      // 💡 추가: 다음 블라인드 레벨 미리보기 - 현재 배지보다 한 톤 더 흐리게, 작게
+      nextBlindPreview: {
+        fontSize: 10, color: "#6B8577", fontFamily: "'Courier New', monospace", whiteSpace: "nowrap",
+      },
       potWrap: { display: "flex", alignItems: "baseline", gap: 8 },
       potLabel: { fontFamily: "'Courier New', monospace", fontSize: 12, color: "#C9A44C", letterSpacing: 2 },
       potValue: { fontSize: 34, color: "#F4EDD8", fontWeight: 700, textShadow: "0 0 20px rgba(201,164,76,0.35)" },
@@ -3920,14 +4169,6 @@
       badBadge: {
         fontSize: 11, color: "#F4EDD8", background: "#7a2f2a", borderRadius: 10,
         padding: "2px 8px", fontFamily: "'Courier New', monospace", width: "fit-content",
-      },
-      // 💡 추가: 파산한 좌석 위에 겹쳐서 뜨는 '새 AI 참가' 버튼
-      aiRejoinBtn: {
-        position: "absolute", top: "50%", left: "50%", transform: "translate(-50%, -50%)",
-        zIndex: 5, padding: "9px 16px", borderRadius: 10, border: "2px solid #C9A44C",
-        background: "#1a1f18", color: "#EFD9A0", fontSize: 12, fontWeight: 700,
-        cursor: "pointer", fontFamily: "'Courier New', monospace", whiteSpace: "nowrap",
-        boxShadow: "0 0 14px rgba(201,164,76,0.6)",
       },
       cardBase: {
         borderRadius: 8, display: "flex", flexDirection: "column", alignItems: "center",
