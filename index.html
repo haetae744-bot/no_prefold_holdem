@@ -430,6 +430,23 @@
       return Math.ceil(score);
     }
 
+    // 💡 추가: 첸 스코어 하나만으로는 "같은 점수라도 스택 깊이에 따라 실전 가치가 다른" 걸 놓친다
+    // (예: K-Jo와 8-7s가 첸 스코어는 같아도, 딥스택에선 8-7s의 임플라이드 오즈 잠재력이 훨씬 크고
+    // K-Jo는 하이카드 하나로 승부하는 얕은 승부에 가깝다). 홀카드를 대략 세 타입으로 분류해서
+    // decideAI에서 스택 깊이별 보정에 쓴다.
+    function classifyHandType(hole) {
+      const [c1, c2] = hole;
+      const isPair = c1.rank === c2.rank;
+      if (isPair) return "pair";
+      const isSuited = c1.suit === c2.suit;
+      const highRank = Math.max(c1.rank, c2.rank);
+      const lowRank = Math.min(c1.rank, c2.rank);
+      const gap = highRank - lowRank - 1;
+      if (isSuited && gap <= 1) return "suited_connector"; // 수티드 커넥터/원갭 - 임플라이드 오즈형
+      if (!isSuited && highRank >= 11 && gap <= 3) return "offsuit_broadway"; // 오프수트 브로드웨이 - 쇼다운형
+      return "other";
+    }
+
     // 💡 추가: 첸 포뮬러 점수를 '상위 %'로 환산하는 테이블. 대충 추측한 게 아니라 실제로 가능한
     // 1326가지 홀카드 조합(52장 중 2장) 전부의 첸 스코어를 계산해서 만든 정확한 분포표다.
     // [최소점수, 그 점수 이상을 받는 조합의 비율(%)] - 내림차순.
@@ -443,6 +460,44 @@
         if (score >= threshold) return pct;
       }
       return 100;
+    }
+
+    // 💡 추가: 상대의 추정 레인지(첸 스코어 범위) 안에서 무작위로 몇 개 손을 뽑아, 지금 보드에서
+    // 내 손과 직접 승부를 매겨 대략적인 이퀴티(승률)를 추정한다. 진짜 레인지 대 레인지 이퀴티
+    // 계산은 남은 스트리트까지 전부 시뮬레이션해야 해서(빌드 도구도 서버도 없는 단일 HTML 파일
+    // 구조에서) 무겁고 위험하다고 판단해서, '미래 스트리트는 안 보고 지금 이 순간만' 비교하는
+    // 가벼운 버전으로 타협했다. rangeTier가 없으면(레인지를 모르면) 중립값 0.5를 반환한다.
+    function estimateRangeEquity(myHole, community, rangeTier, sampleSize = 30) {
+      if (!rangeTier || community.length === 0) return 0.5;
+      const usedKeys = new Set([...myHole, ...community].map(c => `${c.rank}${c.suit}`));
+      const deck = [];
+      const ranks = [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14];
+      const suits = ['♠', '♥', '♦', '♣'];
+      ranks.forEach(r => suits.forEach(s => {
+        const key = `${r}${s}`;
+        if (!usedKeys.has(key)) deck.push({ rank: r, suit: s });
+      }));
+      if (deck.length < 2) return 0.5;
+
+      const myEv = evaluateBest([...myHole, ...community]);
+      let wins = 0, ties = 0, valid = 0, attempts = 0;
+      const maxAttempts = sampleSize * 10; // 범위에 맞는 손이 잘 안 뽑히면 무한루프 방지용 상한
+      while (valid < sampleSize && attempts < maxAttempts) {
+        attempts++;
+        const i1 = Math.floor(Math.random() * deck.length);
+        let i2 = Math.floor(Math.random() * deck.length);
+        while (i2 === i1) i2 = Math.floor(Math.random() * deck.length);
+        const sampleHole = [deck[i1], deck[i2]];
+        const score = evaluatePreflop(sampleHole);
+        if (score < rangeTier.minScore || score > rangeTier.maxScore) continue;
+        valid++;
+        const oppEv = evaluateBest([...sampleHole, ...community]);
+        const cmp = compareScore(myEv, oppEv);
+        if (cmp > 0) wins++;
+        else if (cmp === 0) ties++;
+      }
+      if (valid === 0) return 0.5; // 표본을 못 채우면 중립값(레인지가 너무 좁게 잡혔거나 한 경우 방어)
+      return (wins + ties * 0.5) / valid;
     }
 
     // 💡 추가: 프리플랍 기준값 근처에서 확률적으로 섞어주는 헬퍼. 실전 강자는 레인지 경계 근처의
@@ -1270,7 +1325,10 @@
           }
           else if (type === "bet") {
             if (isStrong) {
-              if (betRatio > 1.0) { score = 80; comment = "강력한 패지만 오버벳 기미가 있습니다. 콜 범위를 좁혀 상대가 도망갈 수 있습니다."; }
+              if (betRatio > 1.0) {
+                if (ev.cat >= 6 || isBoardHeavy) { score = 100; comment = "압도적인 패로 보드 위험성/상대 콜 성향을 노린 근거 있는 오버벳입니다. 밸류를 최대로 뽑아내는 날카로운 사이징입니다."; }
+                else { score = 80; comment = "강력한 패지만 오버벳 기미가 있습니다. 콜 범위를 좁혀 상대가 도망갈 수 있습니다."; }
+              }
               else if (betRatio < 0.6) {
                 if (isAllIn) { score = 95; comment = "스택이 짧아 정석 사이즈(60~100%)에는 못 미쳤지만, 가진 칩을 전부 투입한 올바른 올인입니다."; }
                 else { score = 75; comment = "유리한 상황이지만 베팅 사이즈가 작습니다. 상대에게 싼 값에 역전 기회(드로우)를 줄 수 있습니다."; }
@@ -1341,7 +1399,10 @@
           }
           else if (type === "bet") {
             if (isStrong) {
-              if (betRatio > 1.0) { score = 80; comment = "강력한 패지만 오버벳 기미가 있습니다. 콜 범위를 좁혀 상대가 도망갈 수 있습니다."; }
+              if (betRatio > 1.0) {
+                if (ev.cat >= 6 || isBoardHeavy) { score = 100; comment = "압도적인 패로 보드 위험성/상대 콜 성향을 노린 근거 있는 오버벳입니다. 밸류를 최대로 뽑아내는 날카로운 사이징입니다."; }
+                else { score = 80; comment = "강력한 패지만 오버벳 기미가 있습니다. 콜 범위를 좁혀 상대가 도망갈 수 있습니다."; }
+              }
               else if (betRatio < 0.6) {
                 if (isAllIn) { score = 95; comment = "스택이 짧아 정석 사이즈(60~100%)에는 못 미쳤지만, 가진 칩을 전부 투입한 올바른 올인입니다."; }
                 else { score = 75; comment = "유리한 상황이지만 베팅 사이즈가 너무 작아 최대 밸류를 뽑아내지 못했습니다."; }
@@ -1482,7 +1543,18 @@
     }
 
 
-    function decideAI(ev, toCall, chips, pot, aiType, drawInfo, hole, community, bb, streetStartPot, opponentsCount, opponentProfile, spr, positionTier, positionLabel, remainingPlayers, raiseCount = 0, actorsRemainingAfterMe = 0, isPreflopAggressor = false, facingUserRaise = false) {
+    function decideAI(ev, toCall, chips, pot, aiType, drawInfo, hole, community, bb, streetStartPot, opponentsCount, opponentProfile, spr, positionTier, positionLabel, remainingPlayers, raiseCount = 0, actorsRemainingAfterMe = 0, isPreflopAggressor = false, facingUserRaise = false, opponentRangeTier = null, isPreviousStreetAggressor = false) {
+      // 💡 추가: 스테이크(판돈) 규모 계수 - BB가 곧 바이인/100 근사치이므로 BB 100(1만원 바이인)~
+      // 10000(100만원 바이인) 구간을 로그 스케일 0~1로 환산한다. 프리플랍/포스트플랍 양쪽에서 공유
+      // (예전엔 프리플랍 분기 안에서만 계산해서 포스트플랍 판단에는 이 신호가 전혀 안 들어가고 있었다).
+      const stakesFactor = getStakesFactor(bb, 100, 10000);
+      // 💡 추가: 포스트플랍 팟오즈 판단에도 경계값 믹싱을 적용하기 위한 폭. 프리플랍은 이미 첸 스코어
+      // 단위(mixWidth, 0.5~2.5)로 믹싱을 넣었는데 포스트플랍은 여전히 "팟오즈가 딱 X% 밑이면 무조건
+      // 콜"처럼 칼같이 갈리고 있었다. potOdds는 0~1 사이 값이라 스케일이 다르므로 별도 폭을 쓴다 -
+      // 낮은 스테이크는 넓게(8%) 섞고, 높은 스테이크는 좁게(2%) 섞어서 거의 확정적으로 판단한다.
+      // 리버/플랍턴 양쪽에서 공유하기 위해 함수 최상단에서 계산.
+      const potOddsMixWidth = 0.08 + (0.02 - 0.08) * stakesFactor;
+
       // 💡 추가: 프리플랍(커뮤니티 카드 0장) 전용 분기. 포스트플랍 판단 장치(SPR 커밋, 보드 위협도,
       // 탑페어/투페어 비교 등)는 전부 보드가 있다는 걸 전제로 하므로 여기서는 전부 건너뛰고,
       // 첸 포뮬러(evaluatePreflop) 점수 하나로 오픈레이즈/콜/폴드를 판단한다. 레인지 차트(포지션×성향별
@@ -1490,13 +1562,9 @@
       if (community.length === 0) {
         const chenScore = evaluatePreflop(hole);
 
-        // 💡 추가: 스테이크(판돈) 규모 계수 - BB가 곧 바이인/100 근사치이므로 BB 100(1만원 바이인)~
-        // 10000(100만원 바이인) 구간을 로그 스케일 0~1로 환산한다. 경계값 믹싱 폭과 상대 읽기 익스플로잇
-        // 강도 조절에 재사용 - 판이 커질수록 AI가 더 날카롭고(믹싱 폭 좁음) 더 공격적으로 상대 패턴을
-        // 파고든다(익스플로잇 강화).
-        const stakesFactor = getStakesFactor(bb, 100, 10000);
-        // 💡 추가: 경계값 믹싱 폭도 스테이크에 따라 조정. 낮은 스테이크(약한 상대)는 넓게 섞어서
+        // 💡 수정: 경계값 믹싱 폭도 스테이크에 따라 조정. 낮은 스테이크(약한 상대)는 넓게 섞어서
         // 판단이 들쭉날쭉하고, 높은 스테이크(고수)는 좁게 섞어서 거의 기준값 그대로 딱 자르듯 판단한다.
+        // (stakesFactor는 이제 함수 최상단에서 계산되어 프리플랍/포스트플랍이 공유한다)
         const mixWidth = 2.5 + (0.5 - 2.5) * stakesFactor;
 
         // 💡 추가: 스택 깊이(유효 빅블라인드 개수) 반영. 실전에선 숏스택일수록 임플라이드 오즈를
@@ -1508,6 +1576,23 @@
         if (stackDepthBB <= 20) stackAdjust = 2;        // 숏스택 - 확실한 패만
         else if (stackDepthBB <= 40) stackAdjust = 1;   // 다소 숏 - 살짝 타이트
         else if (stackDepthBB >= 150) stackAdjust = -1; // 딥스택 - 살짝 루즈(임플라이드 오즈)
+
+        // 💡 추가: 손 타입별 스택 깊이 보정. 첸 스코어만 보면 K-Jo와 8-7s가 같은 점수로 나올 수
+        // 있는데, 딥스택에선 8-7s(수티드 커넥터)가 임플라이드 오즈를 크게 살릴 수 있어 실질 가치가
+        // 더 높고, K-Jo(오프수트 브로드웨이)는 반대로 큰 팟에서 킥커 싸움에 몰리기 쉬워 딥스택일수록
+        // 상대적으로 불리하다. 숏스택에서는 반대(임플라이드 오즈를 실현할 스트리트가 부족하니 오히려
+        // 쇼다운 가치가 명확한 하이카드 쪽이 낫다). stackAdjust(블랭킷 조정) 위에 손 타입만큼만 추가로
+        // 얹는다.
+        const handType = classifyHandType(hole);
+        let typeAdjust = 0;
+        if (stackDepthBB >= 100) {
+          if (handType === "suited_connector") typeAdjust = -1.5;
+          else if (handType === "offsuit_broadway") typeAdjust = 1;
+        } else if (stackDepthBB <= 30) {
+          if (handType === "suited_connector") typeAdjust = 1.5;
+          else if (handType === "offsuit_broadway") typeAdjust = -1;
+        }
+        stackAdjust += typeAdjust;
 
         // 💡 수정: 기존엔 선형 보정(actorsRemainingAfterMe*0.6) 위에 레이트 포지션만 별도 보너스를
         // 덧붙이는 식이었는데, 실제 솔버 기반 오픈 레인지 데이터(UTG 약 15%, 컷오프 약 25%,
@@ -1641,7 +1726,19 @@
         let targetRatio = 0.5; // 기본적으로 팟의 50%
 
         if (isStrong) {
-          targetRatio = 0.6 + (Math.random() * 0.4);
+          // 💡 추가: 오버벳(팟보다 큰 사이즈) - 지금까지는 최대 사이즈가 팟의 100~110% 정도에서
+          // 그쳐서, "진짜 압도적인 강패로 보호/밸류를 극대화하는" 사이징이 아예 없었다. ev.cat이
+          // 트리플(3) 이상이고 '상황적으로만 승격된 패'가 아닌 진짜 완성된 강패일 때, 보드가
+          // 위험하거나(드로우를 죽이는 보호 목적) 상대가 잘 안 접는 성향으로 읽히면(콜링 스테이션
+          // 상대로는 크게 쳐도 폴드 이퀴티 손실이 적으니 밸류만 극대화) 가끔 오버벳을 쓴다.
+          const isNutsLevel = ev && ev.cat >= 3 && !isSituationalUpgrade;
+          const looseOpponent = opponentProfile && opponentProfile.foldToBetRate < 0.3;
+          const overbetChance = looseOpponent ? 0.35 : 0.15;
+          if (isNutsLevel && (boardDanger || looseOpponent) && Math.random() < overbetChance) {
+            targetRatio = 1.2 + (Math.random() * 0.6); // 팟의 120~180%
+          } else {
+            targetRatio = 0.6 + (Math.random() * 0.4);
+          }
         } else if (isModerate) {
           targetRatio = 0.3 + (Math.random() * 0.2);
         } else {
@@ -1658,6 +1755,22 @@
         }
 
         const roundedBet = Math.max(bb * 5, Math.round(rawBet / roundingUnitForBB(bb)) * roundingUnitForBB(bb));
+        return Math.max(minBetAllowed, Math.min(roundedBet, chips));
+      };
+
+      // 💡 추가: 블락벳 - 쇼다운 밸류를 지키면서 판 크기를 통제하려는 작은 사이즈. 애매한 패로
+      // 체크하면 공짜 카드를 주게 되는 상황에서, 크게 안 걸고 저렴하게 정보를 얻거나 최소한의
+      // 밸류를 챙기려는 목적. calculateThinBet과 별개로 더 작은 전용 함수로 분리한 이유: 기존
+      // 씬밸류 사이즈(30~50%)보다도 확실히 작아야 '블락벳'이라는 개념이 성립한다.
+      // 💡 버그 수정: 처음엔 목표 15~25%에 bb*3 최소치까지 강제했었는데, 오프닝 베팅 자체가
+      // '팟의 25% 이상' 규칙(calcMinOpeningBet)을 갖고 있어서 실제로는 그 규칙에 항상 걸려
+      // 진짜 작은 사이즈가 나올 수 없었다(테스트에서 0건 확인). bb*3 강제 하한을 없애고 목표
+      // 비율을 22~32%로 올려서, 오프닝 최소 규칙과 충돌 없이 '작은 사이즈' 취지를 살렸다.
+      const calculateBlockBet = () => {
+        const targetRatio = 0.22 + (Math.random() * 0.10);
+        const rawBet = pot * targetRatio;
+        const minBetAllowed = toCall === 0 ? calcMinOpeningBet(bb, streetStartPot) : bb * 2;
+        const roundedBet = Math.round(rawBet / roundingUnitForBB(bb)) * roundingUnitForBB(bb);
         return Math.max(minBetAllowed, Math.min(roundedBet, chips));
       };
 
@@ -1702,9 +1815,14 @@
       const tableDynamicsForAI = calculateTableDynamics(remainingPlayers);
       const tableSizeBoost = tableDynamicsForAI.tier === "headsup" ? 1.6 : tableDynamicsForAI.tier === "short" ? 1.2 : 1;
 
-      // 💡 새로 추가: 유저가 벳에 잘 접으면(foldToBetRate↑) 블러핑을 늘리고, 잘 안 접으면(콜링 스테이션 성향) 블러핑을 줄임.
-      // 표본 부족(opponentProfile === null)이면 중립값 1 유지.
-      const exploitMultiplier = opponentProfile ? (0.6 + opponentProfile.foldToBetRate) : 1;
+      // 💡 수정: 유저가 벳에 잘 접으면(foldToBetRate↑) 블러핑을 늘리고, 잘 안 접으면(콜링 스테이션 성향) 블러핑을 줄임.
+      // 표본 부족(opponentProfile === null)이면 중립값 1 유지. 여기에 스테이크 규모 증폭까지 추가 - 프리플랍은
+      // 이미 exploitCap을 스테이크별로 2~5점까지 스케일했는데 포스트플랍은 고정 공식 그대로였다. 낮은
+      // 스테이크(약한 상대)는 패턴을 읽어도 절반만 반영하고, 높은 스테이크(고수)는 최대 2배까지 더 세게
+      // 파고들도록 - 편차(기준값 1에서 얼마나 벗어났는지)를 증폭한다.
+      const exploitBase = opponentProfile ? (0.6 + opponentProfile.foldToBetRate) : 1;
+      const exploitAmplify = 0.5 + 1.5 * stakesFactor; // 낮은 스테이크 0.5배 감쇠 ~ 높은 스테이크 2배 증폭
+      const exploitMultiplier = opponentProfile ? (1 + (exploitBase - 1) * exploitAmplify) : 1;
 
       // 💡 버그 수정: multiwayPenalty/exploitMultiplier/blockerBoost/positionBoost/tableSizeBoost를 전부
       // 곱하면(각각 최대 1.6배 안팎) 유리한 조건이 여러 개 겹치는 순간 3~6배까지 복합되어 블러핑 확률이
@@ -1760,14 +1878,31 @@
 
       // 🌊 [리버(River) 전용 AI 판단 로직] 🌊
       if (isRiver) {
+        // 💡 추가: 리버 트리플배럴 인지 - 턴에서도 내가 공격자였고, 아직 아무도 안 걸었으면(내가
+        // 먼저 칠 기회). 실전에서 트리플배럴은 더블배럴보다도 더 신중해지는 게 보통이라(레인지가
+        // 극도로 좁혀짐), 부스트 폭을 플랍/턴보다 더 작게 잡는다.
+        const isRiverBarrelSpot = isPreviousStreetAggressor && toCall === 0;
         switch (aiType) {
           case "Maniac": // 미치광이: 블러핑 킹
             if (isStrong) return decideStrongAction();
             
             // 💡 추가: 마니악이 애매한 패(isModerate)를 들었을 때의 처리 로직
             if (isModerate) {
-              if (toCall === 0) return Math.random() < 0.50 ? { type: "bet", amount: calculateThinBet(0.4, 0.7) } : { type: "check" };
-              if (potOdds < (0.30 + bluffCatchBonus)) return { type: "call" };
+              if (toCall === 0) {
+                // 💡 수정: 이분법(벳 아니면 체크)이었던 걸 블락벳까지 세 갈래로 나눔 - 사이즈가
+                // 획일적이지 않게.
+                const r = Math.random();
+                if (r < 0.15) return { type: "bet", amount: calculateBlockBet() };
+                if (r < 0.50) return { type: "bet", amount: calculateThinBet(0.4, 0.7) };
+                return { type: "check" };
+              }
+              // 💡 추가: 헤즈업이고 상대 레인지 태깅이 있으면 레인지 이퀴티로 판단
+              if (opponentRangeTier) {
+                const rangeEquity = estimateRangeEquity(hole, community, opponentRangeTier);
+                if (rangeEquity > potOdds + 0.03) return { type: "call" };
+                return { type: "fold" };
+              }
+              if (mixedThresholdCheck(0.30 + bluffCatchBonus, potOdds, potOddsMixWidth)) return { type: "call" };
               return { type: "fold" };
             }
             if (isWeak && toCall === 0 && Math.random() < bluffProb(0.60)) return { type: "bet", amount: calculateThinBet(0.5, 0.8) };
@@ -1776,20 +1911,20 @@
             // 억제)까지 전부 빠져있었다. bluffProb(0.20)으로 통일해서 다른 블러핑 판단과 동일하게
             // 모든 배수가 일관되게 적용되도록 함.
             if (isWeak && toCall > 0 && Math.random() < bluffProb(0.20)) return { type: "bet", amount: calculateThinBet(0.5, 0.8) };
-            if (toCall > 0 && potOdds < 0.35) return { type: "call" }; 
+            if (toCall > 0 && mixedThresholdCheck(0.35, potOdds, potOddsMixWidth)) return { type: "call" };
             if (toCall > 0) return { type: "fold" };
             return { type: "check" };
 
           case "Rock": // 바위: 절대 무리 안 함
             if (isStrong) return decideStrongAction();
             // 💡 수정: 상대가 블러핑 쟁이면 바위조차도 콜 기준을 관대하게 적용 (bluffCatchBonus)
-            if (isModerate && toCall > 0 && potOdds < (0.27 + bluffCatchBonus)) return { type: "call" }; 
+            if (isModerate && toCall > 0 && mixedThresholdCheck(0.27 + bluffCatchBonus, potOdds, potOddsMixWidth)) return { type: "call" };
             if (toCall > 0) return { type: "fold" };
             return { type: "check" };
 
           case "Station": // 콜링 스테이션: 궁금해서 다 받아줌
             if (isStrong) return decideStrongAction();
-            if (toCall > 0 && potOdds < 0.40) return { type: "call" }; // 💡 무지성 70% 콜 제거
+            if (toCall > 0 && mixedThresholdCheck(0.40, potOdds, potOddsMixWidth)) return { type: "call" }; // 💡 무지성 70% 콜 제거
             if (toCall > 0) return { type: "fold" };
             return { type: "check" };
 
@@ -1798,13 +1933,25 @@
             if (isStrong) return decideStrongAction();
             if (isModerate) {
               if (toCall === 0) {
-                return Math.random() < 0.35 ? { type: "bet", amount: calculateThinBet(0.3, 0.4) } : { type: "check" };
+                const r = Math.random();
+                if (r < 0.12) return { type: "bet", amount: calculateBlockBet() };
+                if (r < 0.35) return { type: "bet", amount: calculateThinBet(0.3, 0.4) };
+                return { type: "check" };
+              }
+              // 💡 수정: 헤즈업이고 상대 레인지 태깅이 있으면, 그 레인지 대비 지금 보드에서의
+              // 추정 이퀴티를 팟오즈와 직접 비교한다(표준적인 '이퀴티 > 필요 팟오즈면 콜' 판단) -
+              // 기존의 고정 30% 휴리스틱보다 상대가 실제로 어떤 손을 들고 있을지 반영한 판단이다.
+              // 정보가 없으면(멀티웨이 등) 기존 휴리스틱으로 대체.
+              if (opponentRangeTier) {
+                const rangeEquity = estimateRangeEquity(hole, community, opponentRangeTier);
+                if (rangeEquity > potOdds + 0.03) return { type: "call" };
+                return { type: "fold" };
               }
               // 💡 수정: 블러프 캐치 보너스 반영
-              if (potOdds < (0.3 + bluffCatchBonus)) return { type: "call" }; 
+              if (mixedThresholdCheck(0.3 + bluffCatchBonus, potOdds, potOddsMixWidth)) return { type: "call" };
               return { type: "fold" };
             }
-            if (toCall === 0 && Math.random() < bluffProb(0.20)) return { type: "bet", amount: calculateThinBet(0.4, 0.6) };
+            if (toCall === 0 && Math.random() < bluffProb(isRiverBarrelSpot ? 0.32 : 0.20)) return { type: "bet", amount: calculateThinBet(0.4, 0.6) };
             if (toCall > 0) return { type: "fold" };
             return { type: "check" };
         }
@@ -1820,6 +1967,18 @@
       // 상당히 높은 빈도로 플랍 베팅을 이어가는데, 지금까지는 이걸 완전히 무시하고 매 스트리트를
       // 독립적으로(패 강도만 보고) 판단하고 있었다.
       const isCbetSpot = isPreflopAggressor && community.length === 3 && toCall === 0;
+      // 💡 추가: 보드 텍스처가 콜러(방어자) 레인지에 유리한지 판단. 실전에서는 낮고 서로 연결된
+      // 보드(예: 5-6-7)일수록 프리플랍에서 콜만 하고 들어온 사람(로우 포켓, 커넥터 위주)의 레인지가
+      // 하이카드 위주인 프리플랍 레이저보다 유리해져서, 레이저라도 C-Bet 빈도를 낮추는 게 정석이다.
+      // boardDanger(플러시/스트레이트 위협)에 보드 최고 카드가 J 이하(낮은 보드)라는 조건을 더해서
+      // 근사치로 판단한다 - 지금까지는 내가 프리플랍 어그레서라는 사실 하나만 보고 기계적으로
+      // C-Bet 빈도를 올리고 있어서, 이런 보드에서도 무작정 찌르다가 체크레이즈에 당할 위험이 있었다.
+      const boardFavorsCaller = isCbetSpot && boardDanger && Math.max(...community.map(c => c.rank)) <= 11;
+      // 💡 추가: 턴 배럴링(연속 압박) 인지 - 플랍에서도 내가 공격자였고, 지금이 턴(4장)이며, 아직
+      // 아무도 베팅 안 한 상황. 지금까지는 C-Bet이 플랍 한 스트리트에만 걸려있어서, 플랍에서 안
+      // 통해도 턴으로 압박을 이어가는 실전 감각(더블 배럴)이 전혀 없었다. 싱글배럴(C-Bet)보다는
+      // 다소 낮은 강도로 이어간다(실전에서도 배럴을 거듭할수록 레인지가 좁혀지고 신중해짐).
+      const isBarrelSpot = isPreviousStreetAggressor && community.length === 4 && toCall === 0;
 
       if (isTotalAir && toCall > 0 && Math.random() < 0.90) {
         return { type: "fold" };
@@ -1828,9 +1987,14 @@
       switch (aiType) {
         case "Maniac": {
           if (isStrong) return decideStrongAction();
-          // 💡 수정: C-Bet 스팟이면 원래도 높은 블러프 빈도(40%)를 75%까지 끌어올림
-          const maniacBluffRate = isCbetSpot ? 0.75 : getNoisyThreshold(0.40, 0.15);
-          if (Math.random() < bluffProb(maniacBluffRate)) return { type: "bet", amount: calculateThinBet(0.5, 0.8) };
+          // 💡 수정: C-Bet 스팟이면 원래도 높은 블러프 빈도(40%)를 75%까지 끌어올리되, 보드가 콜러
+          // 레인지에 유리하면(boardFavorsCaller) 오히려 기본 빈도보다도 낮춘다.
+          const maniacBluffRate = boardFavorsCaller ? 0.25 : (isCbetSpot ? 0.75 : (isBarrelSpot ? 0.55 : getNoisyThreshold(0.40, 0.15)));
+          if (Math.random() < bluffProb(maniacBluffRate)) {
+            // 💡 추가: 사이즈도 매번 0.5~0.8로 획일적이지 않게, 가끔(15%) 블락벳도 섞는다.
+            const amount = Math.random() < 0.15 ? calculateBlockBet() : calculateThinBet(0.5, 0.8);
+            return { type: "bet", amount };
+          }
           if (toCall > 0 && (isModerate || drawInfo.hitChance >= potOdds - 0.10)) return { type: "call" };
           if (toCall > 0) return { type: "fold" };
           return { type: "check" };
@@ -1843,9 +2007,10 @@
           }
           // 💡 추가: Rock은 원래 약한 패로는 절대 안 베팅하는 성향이지만, 프리플랍에서 직접 레이즈해
           // 놓고 플랍에서 완전히 손을 놓아버리는 것도 부자연스럽다. 다른 성향보다는 훨씬 낮은
-          // 빈도(35%)로만, C-Bet 스팟에 한해서 절제된 스탑 한 번을 시도한다.
-          if (isCbetSpot && Math.random() < 0.35) return { type: "bet", amount: calculateThinBet(0.4, 0.6) };
-          if (isModerate && toCall > 0 && potOdds < (0.28 + bluffCatchBonus)) return { type: "call" };
+          // 빈도(35%)로만, C-Bet 스팟에 한해서 절제된 스탑 한 번을 시도한다. 단, 보드가 콜러
+          // 레인지에 유리하면 Rock은 아예 시도조차 안 한다(원래도 신중한 성향이라 가장 먼저 접는다).
+          if (isCbetSpot && !boardFavorsCaller && Math.random() < 0.35) return { type: "bet", amount: calculateThinBet(0.4, 0.6) };
+          if (isModerate && toCall > 0 && mixedThresholdCheck(0.28 + bluffCatchBonus, potOdds, potOddsMixWidth)) return { type: "call" };
           if (toCall > 0 && drawInfo.hitChance >= (potOdds - bluffCatchBonus)) return { type: "call" };
           if (toCall > 0) return { type: "fold" };
           return { type: "check" };
@@ -1863,13 +2028,27 @@
         default: {
           if (isStrong) return decideStrongAction();
           if (isModerate) {
-            if (toCall === 0) return Math.random() < getNoisyThreshold(0.50, 0.10) ? { type: "bet", amount: calculateThinBet(0.3, 0.5) } : { type: "check" };
-            if (toCall > 0 && potOdds < getNoisyThreshold(0.30 + bluffCatchBonus, 0.05)) return { type: "call" };
+            if (toCall === 0) {
+              const bettingChance = getNoisyThreshold(0.50, 0.10);
+              const r = Math.random();
+              if (r < bettingChance * 0.25) return { type: "bet", amount: calculateBlockBet() };
+              if (r < bettingChance) return { type: "bet", amount: calculateThinBet(0.3, 0.5) };
+              return { type: "check" };
+            }
+            // 💡 추가: 헤즈업이고 상대 레인지 태깅이 있으면 리버와 동일하게 레인지 이퀴티로 판단
+            if (opponentRangeTier) {
+              const rangeEquity = estimateRangeEquity(hole, community, opponentRangeTier);
+              if (rangeEquity > potOdds + 0.03) return { type: "call" };
+              return { type: "fold" };
+            }
+            if (toCall > 0 && mixedThresholdCheck(getNoisyThreshold(0.30 + bluffCatchBonus, 0.05), potOdds, potOddsMixWidth)) return { type: "call" };
             return { type: "fold" };
           }
           // 💡 수정: C-Bet 스팟이면 원래 블러프 빈도(20%)를 65%까지 끌어올림 - TAG가 대표적으로
-          // "정석적인 C-Bet"을 보여주기 가장 적합한 성향이라 여기서 효과가 가장 잘 드러난다.
-          const tagBluffRate = isCbetSpot ? 0.65 : getNoisyThreshold(0.20, 0.05);
+          // "정석적인 C-Bet"을 보여주기 가장 적합한 성향이라 여기서 효과가 가장 잘 드러난다. 단,
+          // 보드가 콜러 레인지에 유리하면(boardFavorsCaller) 오히려 기본 빈도보다도 낮춘다 - 실전
+          // GTO에서도 이런 보드는 체크백 빈도가 훨씬 높다.
+          const tagBluffRate = boardFavorsCaller ? 0.10 : (isCbetSpot ? 0.65 : (isBarrelSpot ? 0.42 : getNoisyThreshold(0.20, 0.05)));
           if (toCall === 0 && Math.random() < bluffProb(tagBluffRate)) return { type: "bet", amount: calculateThinBet(0.4, 0.6) };
           if (toCall > 0 && drawInfo.hitChance >= (potOdds - bluffCatchBonus)) return { type: "call" };
           if (toCall > 0) return { type: "fold" };
@@ -1926,6 +2105,11 @@
         // 💡 추가: 프리플랍에서 마지막으로 레이즈한 사람(공격 주도권을 쥔 사람) 기록. 플랍에서
         // C-Bet(연속 베팅) 빈도를 조정하는 데 쓰인다. 매 핸드 시작 시 null로 초기화됨.
         preflopAggressor: null,
+        // 💡 추가: 프리플랍 액션으로 유추한 각 플레이어의 대략적인 레인지(첸 스코어 하한/상한).
+        // 레이즈했으면 '그 레이즈를 낼 만큼 강했다'는 하한선을, 콜만 했으면 그보다 넓은 범위를
+        // 기록한다. 포스트플랍에서 상대 레인지를 감안한 판단(estimateRangeEquity)에 쓰인다.
+        // 매 핸드 시작 시 초기화됨.
+        playerRangeTier: {},
         // 💡 수정: 기본값을 5로 - 지금은 AI 인원수가 1/5/8 중 하나로 고정 선택되는데, 예전 자유선택
         // (1~8명) 시절 기본값(6)이 그대로 남아있었다. 6명 AI = 총 7인은 세 선택지 중 어디에도 없고,
         // 포지션 이름표(2/6/9인용 테이블)도 지원 안 하는 어중간한 인원수라 그대로 두면 안 됐다.
@@ -2334,6 +2518,12 @@
           s.lastAction[player] = amt === toCall ? `콜 ${amt}` : `콜 ${amt} (올인)`;
           pushLog(s, `${name}: 콜 (${amt})`);
           s.streetActions[player] = { type: "call", amount: amt };
+          // 💡 추가: 프리플랍에서 실제로 뭔가를 지불하는 콜(림프/방어)이면 레인지 등급 태깅.
+          // 레이즈보다 넓은 범위, 상한도 3벳급보다 낮게(콜만 했다는 건 재레이즈할 만큼은 아니라는
+          // 신호이므로 - 물론 슬로우플레이 가능성도 있지만 가벼운 근사치라 이 정도로 단순화).
+          if (s.phase === "preflop" && amt > 0) {
+            s.playerRangeTier[player] = { minScore: -2, maxScore: 12 };
+          }
         } else if (action.type === "bet") {
           playSound('bet', isMutedBgm, isMutedSfx);
 
@@ -2365,6 +2555,12 @@
             // 3벳/4벳처럼 레이즈가 여러 번 나오면 매번 갱신되어, 최종적으로 마지막에 레이즈한
             // 사람이 어그레서가 된다(포커 용어상 '어그레서'는 항상 마지막 레이저를 가리킴).
             if (s.phase === "preflop") s.preflopAggressor = player;
+            // 💡 추가: 모든 스트리트의 마지막 공격자(베팅/레이즈한 사람)를 스트리트별로 기록.
+            // 턴/리버에서 "직전 스트리트에도 내가 공격했었나"를 판단해 배럴링(연속 압박) 빈도를
+            // 조정하는 데 쓴다 - 지금까지는 C-Bet이 플랍 한 스트리트에만 걸려있어서, 플랍에서 안
+            // 통해도 턴/리버로 압박을 이어가는 실전 감각이 전혀 없었다.
+            s.streetAggressor = s.streetAggressor || {};
+            s.streetAggressor[s.phase] = player;
           }
           const label = toCall > 0 ? "레이즈" : "베팅";
           s.lastAction[player] = `${label} ${total}`;
@@ -2375,6 +2571,16 @@
           // 반복하다 무조건 올인으로 치닫는 걸 막기 위해, decideAI가 이 횟수를 보고 자제하도록 함
           if (toCall > 0) {
             s.raiseCountThisStreet = (s.raiseCountThisStreet || 0) + 1;
+          }
+          // 💡 추가: 프리플랍 레이즈/오픈이면 대략적인 레인지 등급을 태깅한다. 정확한 포지션/스택
+          // 보정까지 재현하진 않고(그건 이미 3곳에서 유지하고 있어 더 늘리면 어긋날 위험만 커짐),
+          // '3벳 이상인가 vs 오픈인가'라는 가장 굵직한 신호만 사용한다 - 이게 손패 강도에 대한
+          // 정보량이 압도적으로 크기 때문에 가벼운 근사치로도 쓸모가 있다.
+          if (s.phase === "preflop") {
+            const isReraise = (s.raiseCountThisStreet || 0) >= 2;
+            s.playerRangeTier[player] = isReraise
+              ? { minScore: 9, maxScore: 20 }   // 3벳 이상 - 프리미엄 위주
+              : { minScore: 3, maxScore: 20 };  // 오픈 레이즈 - 레이트 포지션 스틸까지 커버하도록 하한을 낮게
           }
         }
         return { raised, isFullRaise }; // 두 개의 결과를 반환
@@ -2556,7 +2762,20 @@
             if (!gameStateRef.current.setupDone) return;
             // 💡 유저가 이번 핸드에 아직 살아있을 때만 '유저 프로필'을 반영 (이미 폴드했으면 반영할 대상이 없으므로 중립)
             const opponentProfile = (!s.folded.user && !s.eliminated.user) ? getOpponentProfile(s) : null;
-            action = decideAI(ev, toCall, s.chips[p], s.pot, s.aiPersonalities[p], drawInfo, s.hole[p], s.community, s.bb, s.streetStartPot, activeOpponentsCount, opponentProfile, sprInfo.spr, positionInfo.tier, positionInfo.label, remainingPlayersCount, s.raiseCountThisStreet || 0, positionInfo.actorsRemainingAfterMe, s.preflopAggressor === p, s.preflopAggressor === "user");
+            // 💡 추가: 헤즈업(상대가 정확히 1명)일 때만 그 상대의 추정 레인지를 넘겨준다. 멀티웨이는
+            // 상대가 여럿이라 '누구의 레인지'인지 모호해지므로, 지금은 가장 흔하고 명확한 헤즈업
+            // 상황에만 한정한다.
+            let opponentRangeTier = null;
+            if (activeOpponentsCount === 1) {
+              const soleOpponent = players.find(opp => !s.folded[opp] && !s.eliminated[opp] && opp !== p);
+              opponentRangeTier = soleOpponent ? (s.playerRangeTier[soleOpponent] || null) : null;
+            }
+            // 💡 추가: 배럴링(연속 압박) 판단을 위해 '직전 스트리트에도 내가 공격자였는지' 계산.
+            // 턴이면 플랍 공격자였는지, 리버면 턴 공격자였는지를 본다.
+            const previousStreetMap = { flop: "preflop", turn: "flop", river: "turn" };
+            const previousStreet = previousStreetMap[s.phase];
+            const isPreviousStreetAggressor = !!(previousStreet && s.streetAggressor && s.streetAggressor[previousStreet] === p);
+            action = decideAI(ev, toCall, s.chips[p], s.pot, s.aiPersonalities[p], drawInfo, s.hole[p], s.community, s.bb, s.streetStartPot, activeOpponentsCount, opponentProfile, sprInfo.spr, positionInfo.tier, positionInfo.label, remainingPlayersCount, s.raiseCountThisStreet || 0, positionInfo.actorsRemainingAfterMe, s.preflopAggressor === p, s.preflopAggressor === "user", opponentRangeTier, isPreviousStreetAggressor);
             if (action.type === "bet" && s.chips[p] <= toCall) action = { type: "call" };
           }
 
@@ -2864,6 +3083,8 @@
 
         s.handWinners = {}; // 💡 새로 추가: 매 핸드마다 승리 기록 초기화
         s.preflopAggressor = null; // 💡 추가: 프리플랍 공격 주도권도 매 핸드 초기화
+        s.streetAggressor = {}; // 💡 추가: 스트리트별 공격자 기록도 매 핸드 초기화(배럴링 판단용)
+        s.playerRangeTier = {}; // 💡 추가: 레인지 등급 추적도 매 핸드 초기화
         const players = s.players;
         s.log = [...s.log];
         s.handNum += 1;
